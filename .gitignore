@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+run_artifacts/
+*.png
+!design/*.png
+.env
+*.local.json
+storage_state*.json
