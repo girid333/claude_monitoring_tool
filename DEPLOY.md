@@ -10,8 +10,16 @@ in a container unless you extend the backend image yourself (see below).
 ```bash
 cd claude_monitoring_tool
 
-# Optional: SAP/SSH credentials (D-018) — never baked into the image.
+# Generate the registry encryption key ONCE (D-023) — needed before you can
+# store any SSH credentials for app/dialog servers or DB hosts via the
+# Systems page. Keep it safe: losing it makes every stored SSH password
+# unrecoverable (you'd re-enter them, nothing else breaks).
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Optional: SAP WebGUI login credentials (D-018, still env-var-only —
+# unaffected by D-023) — never baked into the image.
 cat > .env <<'EOF'
+REGISTRY_ENCRYPTION_KEY=<paste the key generated above>
 SAP_Q4H_USER=...
 SAP_Q4H_PASSWORD=...
 EOF
@@ -19,6 +27,14 @@ EOF
 docker compose up --build
 # or: podman compose up --build   /  podman-compose up --build
 ```
+
+**REGISTRY_ENCRYPTION_KEY (D-023)** is only required once you add SSH
+credentials through the Systems page (app/dialog server or DB host `df -h`
+checks). Everything else — adding systems, SAP WebGUI login, running flows —
+works without it. If it's unset and you try to save an SSH password, the API
+returns a clear error telling you to generate and set it; it's never
+auto-generated (an auto-generated key that changes on every restart would
+silently orphan previously-encrypted passwords).
 
 Frontend: http://localhost:3000 — Systems, Runs, Recorder, Reports.
 Backend: http://localhost:8000/docs
@@ -68,9 +84,12 @@ backend's reachable address changes, rebuild the frontend image with a new
   redeploy.
 - Backend already respects `$PORT` (falls back to 8000) — set it via the
   task definition if your target group expects something else.
-- Put `SAP_<SID>_USER` / `SAP_<SID>_PASSWORD` / `SAP_<SID>_SSH_*` in
-  **Secrets Manager** and reference them as `secrets` (not `environment`)
-  in the task definition — never as plaintext task-def env vars.
+- Put `SAP_<SID>_USER` / `SAP_<SID>_PASSWORD` (D-018) and
+  `REGISTRY_ENCRYPTION_KEY` (D-023) in **Secrets Manager** and reference
+  them as `secrets` (not `environment`) in the task definition — never as
+  plaintext task-def env vars. SSH credentials themselves (D-023) live
+  encrypted inside `systems.json` on the `/data` EFS volume, not as
+  per-system env vars — only the one master key needs a secret entry.
 - Security group: backend only needs outbound HTTPS to the SAP WebGUI host
   (+ SSH/DB ports if using Core BASIS filesystem checks) and inbound 8000
   from the frontend/ALB. No inbound needed on the frontend beyond the ALB.
@@ -111,6 +130,12 @@ monitoring, Functional Sanity flows) is unaffected either way —
 | `CORS_ORIGINS` | backend | `http://localhost:3000` | comma-separated allowed origins |
 | `HEADLESS_DEPLOYMENT` | backend | `1` (set in image) | disables `/api/recorder/start` with a clear 501 |
 | `PORT` | backend | `8000` | uvicorn bind port (ECS/Fargate/Cloud Run inject this) |
-| `SAP_<SID>_USER` / `_PASSWORD` | backend | — | SAP WebGUI credentials (D-018, env-only, never stored) |
-| `SAP_<SID>_SSH_USER` / `_SSH_PASSWORD` / `_SSH_KEY_PATH` | backend | — | Core BASIS filesystem check credentials (D-018) |
+| `SAP_<SID>_USER` / `_PASSWORD` | backend | — | SAP WebGUI login credentials (D-018, env-only, never stored) |
+| `REGISTRY_ENCRYPTION_KEY` | backend | — | Fernet key encrypting SSH credentials stored in `systems.json` (D-023) — required only once you add an SSH credential via the Systems page |
 | `NEXT_PUBLIC_API` | frontend | `http://localhost:8000` | **build arg**, backend URL baked into the client bundle |
+
+Note: `SAP_<SID>_SSH_USER`/`_SSH_PASSWORD`/`_SSH_KEY_PATH` env vars from
+earlier versions of this doc are **obsolete** — D-023 moved SSH credentials
+into the registry (Systems page → per-host, encrypted). If you're upgrading
+from before D-023, re-enter SSH credentials through the UI; the old env
+vars are no longer read.

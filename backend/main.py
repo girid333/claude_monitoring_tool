@@ -2,10 +2,10 @@
 
 Endpoints:
   GET    /api/systems                     registry + last-run summary + credential status
-  POST   /api/systems                     create a system (D-021, no credential fields)
+  POST   /api/systems                     create a system (D-021; SSH creds encrypted, D-023)
   PUT    /api/systems/{sid}               update a system
   DELETE /api/systems/{sid}               remove a system
-  GET    /api/systems/{sid}/credentials   presence-only credential check + env var hint
+  GET    /api/systems/{sid}/credentials   presence-only credential check (SAP env-var hint + SSH status)
   POST /api/run                           start a run (background) -> {run_id}
   GET  /api/events/{run_id}               SSE stream of per-step/per-flow/report events
   GET  /api/runs?sid=                     recent flow run history (RunStore)
@@ -40,7 +40,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from engine.registry import EnvCredentialProvider, Registry, SystemEntry, credential_status
+from engine import crypto
+from engine.registry import (
+    EnvCredentialProvider,
+    Registry,
+    ServerCredential,
+    ServerEntry,
+    SystemEntry,
+    credential_status,
+)
 from engine.store import RunStore
 
 # D-022 (containerization): all three are plain relative paths by default,
@@ -81,6 +89,110 @@ def _require_display() -> None:
             "(uvicorn main:app) to use the Recorder.")
 
 
+class ServerCredentialIn(BaseModel):
+    """D-023: request-side shape for an SSH credential. `password` is
+    plaintext, accepted ONLY here (never persisted as-is, never echoed
+    back) — encrypted into `ServerCredential.password_enc` by
+    `_in_to_credential()` before anything touches disk. Leaving `password`
+    blank on an edit means "keep whatever's already stored", so the
+    frontend never needs to know or re-send the real secret."""
+
+    auth_method: str = "password"
+    username: str = ""
+    password: str = ""
+    key_path: str = ""
+
+
+class ServerEntryIn(BaseModel):
+    hostname: str
+    credential: ServerCredentialIn | None = None
+
+
+class SystemIn(BaseModel):
+    """D-021/D-023: request body for POST/PUT /api/systems. Same fields as
+    SystemEntry except credentials arrive as plaintext-in (ServerCredentialIn)
+    rather than the encrypted-at-rest shape the registry actually stores."""
+
+    sid: str
+    webgui_url: str
+    client: str
+    release_tag: str = "UNKNOWN"
+    auth: str = "basic"
+    tags: list[str] = []
+    rfc_enrichment: bool = False
+    hostname: str = ""
+    instance_number: str = "00"
+    url_checks: list[str] = []
+    servers: list[ServerEntryIn] = []
+    db_hosts: list[ServerEntryIn] = []
+    ssh_auth_method: str = "password"
+    ssh_credential: ServerCredentialIn = ServerCredentialIn()
+
+
+def _in_to_credential(cred_in: ServerCredentialIn | None,
+                       existing: ServerCredential | None) -> ServerCredential | None:
+    """D-023: encrypt a fresh plaintext password, or keep the previously
+    stored ciphertext when the incoming password is blank (edit-without-
+    changing-the-password case)."""
+    if cred_in is None:
+        return None
+    password_enc = (crypto.encrypt(cred_in.password) if cred_in.password
+                     else (existing.password_enc if existing else ""))
+    return ServerCredential(auth_method=cred_in.auth_method, username=cred_in.username,
+                             password_enc=password_enc, key_path=cred_in.key_path)
+
+
+def _existing_host_credential(existing: SystemEntry | None, pool: str, hostname: str) -> ServerCredential | None:
+    if existing is None:
+        return None
+    for h in (existing.servers if pool == "servers" else existing.db_hosts):
+        if h.hostname == hostname:
+            return h.credential
+    return None
+
+
+def _to_stored(sys_in: SystemIn, existing: SystemEntry | None) -> SystemEntry:
+    """D-021/D-023: SystemIn (plaintext credentials) -> SystemEntry
+    (encrypted, the only shape Registry.save() ever writes)."""
+
+    def build_pool(entries_in: list[ServerEntryIn], pool: str) -> list[ServerEntry]:
+        out = []
+        for e in entries_in:
+            existing_cred = _existing_host_credential(existing, pool, e.hostname)
+            out.append(ServerEntry(hostname=e.hostname,
+                                    credential=_in_to_credential(e.credential, existing_cred)))
+        return out
+
+    ssh_credential = _in_to_credential(
+        sys_in.ssh_credential, existing.ssh_credential if existing else None) or ServerCredential()
+
+    return SystemEntry(
+        sid=sys_in.sid, webgui_url=sys_in.webgui_url, client=sys_in.client,
+        release_tag=sys_in.release_tag, auth=sys_in.auth, tags=sys_in.tags,
+        rfc_enrichment=sys_in.rfc_enrichment, hostname=sys_in.hostname,
+        instance_number=sys_in.instance_number, url_checks=sys_in.url_checks,
+        servers=build_pool(sys_in.servers, "servers"),
+        db_hosts=build_pool(sys_in.db_hosts, "db_hosts"),
+        ssh_auth_method=sys_in.ssh_auth_method, ssh_credential=ssh_credential,
+    )
+
+
+def _cred_out(cred: ServerCredential | None) -> dict | None:
+    """D-023: never return password_enc — only whether a password is set."""
+    if cred is None:
+        return None
+    return {"auth_method": cred.auth_method, "username": cred.username,
+            "key_path": cred.key_path, "password_set": bool(cred.password_enc)}
+
+
+def _system_out(s: SystemEntry) -> dict:
+    d = s.model_dump(exclude={"servers", "db_hosts", "ssh_credential"})
+    d["servers"] = [{"hostname": e.hostname, "credential": _cred_out(e.credential)} for e in s.servers]
+    d["db_hosts"] = [{"hostname": e.hostname, "credential": _cred_out(e.credential)} for e in s.db_hosts]
+    d["ssh_credential"] = _cred_out(s.ssh_credential)
+    return d
+
+
 class RunRequest(BaseModel):
     sids: list[str]
     flows: list[str] = []            # paths under flows/
@@ -114,41 +226,45 @@ def systems() -> list[dict]:
     out = []
     for s in reg.systems:
         recent = store.recent(sid=s.sid, limit=1)
-        out.append({**s.model_dump(),
+        out.append({**_system_out(s),
                     "last_run": recent[0] if recent else None,
-                    "credentials": credential_status(s.sid, s.ssh_auth_method)})
+                    "credentials": credential_status(s)})
     return out
 
 
 @app.post("/api/systems")
-def create_system(entry: SystemEntry) -> SystemEntry:
-    """D-021: replaces hand-editing systems.json. Registry only ever holds
-    non-secret connection topology (D-006/D-018/D-021) — credentials are
-    never accepted here; set SAP_<SID>_USER/PASSWORD (+ SSH equivalents)
-    as environment variables on the machine running this backend."""
+def create_system(entry: SystemIn) -> dict:
+    """D-021/D-023: replaces hand-editing systems.json. SAP WebGUI login
+    credentials are still never accepted here (D-018) — set
+    SAP_<SID>_USER/PASSWORD as env vars. SSH credentials for app/dialog
+    servers and DB hosts ARE accepted here (D-023, supersedes D-018 for
+    this one credential class) and are encrypted (engine/crypto.py) before
+    Registry.save() ever writes them to disk."""
     reg = Registry.load(SYSTEMS_PATH)
     try:
         reg.get(entry.sid)
         raise HTTPException(409, f"system {entry.sid!r} already exists — use PUT to update it")
     except KeyError:
         pass
-    reg.upsert(entry)
+    stored = _to_stored(entry, existing=None)
+    reg.upsert(stored)
     reg.save(SYSTEMS_PATH)
-    return entry
+    return _system_out(stored)
 
 
 @app.put("/api/systems/{sid}")
-def update_system(sid: str, entry: SystemEntry) -> SystemEntry:
+def update_system(sid: str, entry: SystemIn) -> dict:
     if entry.sid != sid:
         raise HTTPException(400, "body sid must match the URL sid")
     reg = Registry.load(SYSTEMS_PATH)
     try:
-        reg.get(sid)
+        existing = reg.get(sid)
     except KeyError:
         raise HTTPException(404, f"unknown sid {sid!r}")
-    reg.upsert(entry)
+    stored = _to_stored(entry, existing=existing)
+    reg.upsert(stored)
     reg.save(SYSTEMS_PATH)
-    return entry
+    return _system_out(stored)
 
 
 @app.delete("/api/systems/{sid}")
@@ -162,24 +278,19 @@ def delete_system(sid: str) -> dict:
 
 @app.get("/api/systems/{sid}/credentials")
 def system_credentials(sid: str) -> dict:
-    """Presence-only check (never returns values) so the Systems page can
-    show a configured/missing badge and tell the user exactly which env
-    vars to set, without this API ever being able to leak a secret."""
+    """Presence-only check (never returns secret values). SAP WebGUI login
+    status is env-var-based (D-018); SSH status is registry-based (D-023) —
+    see credential_status()."""
     reg = Registry.load(SYSTEMS_PATH)
     try:
         entry = reg.get(sid)
     except KeyError:
         raise HTTPException(404, f"unknown sid {sid!r}")
-    status = credential_status(sid, entry.ssh_auth_method)
+    status = credential_status(entry)
     return {
         "sid": sid,
         **status,
-        "hint": {
-            "sap": f"export SAP_{sid}_USER=... SAP_{sid}_PASSWORD=...",
-            "ssh": (f"export SAP_{sid}_SSH_USER=... SAP_{sid}_SSH_KEY_PATH=..."
-                    if entry.ssh_auth_method == "key"
-                    else f"export SAP_{sid}_SSH_USER=... SAP_{sid}_SSH_PASSWORD=..."),
-        },
+        "hint": {"sap": f"export SAP_{sid}_USER=... SAP_{sid}_PASSWORD=..."},
     }
 
 

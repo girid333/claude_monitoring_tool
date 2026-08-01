@@ -1,20 +1,29 @@
-"""System registry (D-006, extended D-021) + interim credential handling.
+"""System registry (D-006, extended D-021, D-023) + interim credential
+handling.
 
-Registry file (systems.json) holds NO credentials — that shape is final
-(D-018). Credentials come from a CredentialProvider (login/base.py).
+Registry file (systems.json) holds NO SAP WebGUI login credentials — that
+part of D-018 is unchanged. Those come from a CredentialProvider
+(login/base.py):
 
-INTERIM provider (until OQ-8 is decided): environment variables
-  SAP_<SID>_USER / SAP_<SID>_PASSWORD (+ SSH equivalents, see below)
-This keeps secrets out of files entirely. It is a stopgap, not the OQ-8
-answer — encryption-at-rest for a real secret store is still to be decided.
+INTERIM provider (until OQ-8's WebGUI-login piece is decided): environment
+variables SAP_<SID>_USER / SAP_<SID>_PASSWORD. This keeps WebGUI login
+secrets out of files entirely. Stopgap, not final.
 
-D-021: the registry now also carries the v1-parity fields CoreBasisSection
-needs (hostname, instance_number, db_host, servers, url_checks,
-ssh_auth_method) — all of these are non-secret connection topology, not
-credentials, so they belong in the file per the same line D-006 already
-drew. The dividing line stays crisp: identity (usernames) + secret material
-(passwords, key paths) => env vars only; everything about WHERE to connect
-=> registry, now editable via CRUD (main.py /api/systems) instead of by
+D-023 SUPERSEDES D-018 for SSH credentials specifically (Giri's explicit
+request, 2026-08-01): SSH usernames/passwords/key-paths for the app/dialog
+servers and DB hosts a Core BASIS run SSHes into for `df -h` filesystem
+checks now live IN the registry, per-host, because a real landscape can
+have different SSH credentials per box — env vars keyed only by SID can't
+express that. Passwords are never written in plaintext: `engine/crypto.py`
+(Fernet, key from REGISTRY_ENCRYPTION_KEY) encrypts them before
+`Registry.save()` ever touches disk. SSH key-based auth stores only a path
+to a key file already present on the backend host's filesystem — never the
+key material itself. SAP WebGUI login credentials are NOT part of this
+change and remain env-var-only.
+
+D-021: the registry also carries the v1-parity topology fields
+CoreBasisSection needs (hostname, instance_number, db_hosts, servers,
+url_checks) — editable via CRUD (main.py /api/systems) instead of by
 hand-editing JSON.
 """
 
@@ -30,6 +39,35 @@ from pydantic import BaseModel, Field
 from .login.base import CredentialProvider
 
 
+class ServerCredential(BaseModel):
+    """D-023: an SSH credential, encrypted at rest. `password_enc` is a
+    Fernet ciphertext (engine/crypto.py) — never plaintext on disk. For
+    auth_method="key", `key_path` points at a private key file that already
+    exists on the backend host; the key's contents are never stored here."""
+
+    auth_method: str = "password"  # "password" | "key"
+    username: str = ""
+    password_enc: str = ""         # empty when auth_method == "key"
+    key_path: str = ""             # empty when auth_method == "password"
+
+    def is_set(self) -> bool:
+        if not self.username:
+            return False
+        return bool(self.key_path) if self.auth_method == "key" else bool(self.password_enc)
+
+
+class ServerEntry(BaseModel):
+    """One app/dialog server or DB host (D-023). `credential=None` means
+    "inherit the system's default `ssh_credential`" — matches v1's model of
+    a system-wide SSH credential with optional per-server override."""
+
+    hostname: str
+    credential: ServerCredential | None = None
+
+    def effective_credential(self, system_default: "ServerCredential") -> "ServerCredential":
+        return self.credential if self.credential is not None else system_default
+
+
 class SystemEntry(BaseModel):
     sid: str
     webgui_url: str
@@ -39,13 +77,31 @@ class SystemEntry(BaseModel):
     tags: list[str] = Field(default_factory=list)
     rfc_enrichment: bool = False      # D-013: optional, never a gate
 
-    # D-021 — v1-parity connection topology (non-secret, CRUD-editable):
+    # D-021 — v1-parity connection topology (non-secret):
     hostname: str = ""                # RFC ashost; blank => derive from webgui_url host
     instance_number: str = "00"
-    db_host: str = ""                 # blank => falls back to hostname
-    servers: list[str] = Field(default_factory=list)   # extra app/dialog servers for SSH df -h
     url_checks: list[str] = Field(default_factory=list)  # health-check URLs
-    ssh_auth_method: str = "password"  # "password" | "key" | "mfa" — a strategy choice, not a secret
+
+    # D-023 — app/dialog servers and DB hosts, each independently 0/1/many,
+    # each optionally overriding the system's default SSH credential:
+    servers: list[ServerEntry] = Field(default_factory=list)
+    db_hosts: list[ServerEntry] = Field(default_factory=list)  # was singular db_host: str pre-D-023
+    ssh_auth_method: str = "password"  # "password" | "key" — default for ssh_credential below
+    ssh_credential: ServerCredential = Field(default_factory=ServerCredential)  # D-023: default/fallback
+
+
+def _migrate_system_dict(d: dict) -> None:
+    """D-023 backward-compat shim, mutates `d` in place. Pre-D-023
+    systems.json entries have `servers: list[str]` and a singular
+    `db_host: str`; upgrade both to the new `ServerEntry`-list shape so an
+    existing registry (e.g. Giri's already-added F4H system) doesn't break
+    on the first load after this upgrade, instead of forcing a re-entry."""
+    servers = d.get("servers")
+    if servers and isinstance(servers[0], str):
+        d["servers"] = [{"hostname": h} for h in servers]
+    db_host = d.pop("db_host", None)
+    if db_host and not d.get("db_hosts"):
+        d["db_hosts"] = [{"hostname": db_host}]
 
 
 class Registry(BaseModel):
@@ -56,7 +112,10 @@ class Registry(BaseModel):
         p = Path(path)
         if not p.exists():
             return cls(systems=[])
-        return cls(**json.loads(p.read_text()))
+        raw = json.loads(p.read_text())
+        for sys_raw in raw.get("systems", []):
+            _migrate_system_dict(sys_raw)
+        return cls(**raw)
 
     def save(self, path: str | Path = "systems.json") -> None:
         Path(path).write_text(self.model_dump_json(indent=2) + "\n")
@@ -97,17 +156,21 @@ class EnvCredentialProvider(CredentialProvider):
         return {"user": user, "password": password}
 
 
-def credential_status(sid: str, ssh_auth_method: str = "password") -> dict[str, bool]:
-    """D-021: presence-only check for the Systems page's status badges.
-    NEVER returns values, only booleans — this is the one credential-related
-    read the UI is allowed to see."""
-    sap_ok = bool(os.environ.get(f"SAP_{sid}_USER")) and bool(os.environ.get(f"SAP_{sid}_PASSWORD"))
-    ssh_user_set = bool(os.environ.get(f"SAP_{sid}_SSH_USER"))
-    if ssh_auth_method == "key":
-        ssh_secret_set = bool(os.environ.get(f"SAP_{sid}_SSH_KEY_PATH"))
-    else:
-        ssh_secret_set = bool(os.environ.get(f"SAP_{sid}_SSH_PASSWORD"))
+def credential_status(entry: SystemEntry) -> dict:
+    """D-023: presence-only status for the Systems page's badges. SAP
+    WebGUI login is still env-var-only (D-018 unchanged for that piece) —
+    checked against env vars. SSH credentials are now registry-stored
+    (D-023) — checked against the entry's own encrypted fields, never
+    decrypted here; `ServerCredential.is_set()` only looks at whether
+    password_enc/key_path is non-empty, not what it contains."""
+    sap_ok = bool(os.environ.get(f"SAP_{entry.sid}_USER")) and bool(os.environ.get(f"SAP_{entry.sid}_PASSWORD"))
+    hosts = entry.servers + entry.db_hosts
+    host_status = [
+        {"hostname": h.hostname, "credential_set": h.effective_credential(entry.ssh_credential).is_set()}
+        for h in hosts
+    ]
     return {
         "sap_credentials": sap_ok,
-        "ssh_credentials": ssh_user_set and ssh_secret_set,
+        "ssh_default_credential": entry.ssh_credential.is_set(),
+        "ssh_hosts": host_status,
     }

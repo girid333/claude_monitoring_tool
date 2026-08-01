@@ -192,23 +192,52 @@ def load_v1_orchestrator(v1_path: str | Path):
 
 
 def build_v1_config(sys_entry, creds: dict[str, str]) -> dict:
-    """Map a v2 SystemEntry (registry.py, D-006/D-021) + credentials (D-018)
-    into the flat config dict v1's ReportOrchestrator expects.
+    """Map a v2 SystemEntry (registry.py, D-006/D-021/D-023) + SAP WebGUI
+    credentials (D-018) into the flat config dict v1's ReportOrchestrator
+    expects.
 
-    D-021 superseded this function's original design: connection topology
-    (hostname, instance_number, db_host, servers, url_checks,
-    ssh_auth_method) now lives in the registry itself, CRUD-editable via
-    /api/systems, rather than only being reachable through undocumented
-    env-var overrides. Only genuine secrets (usernames, passwords, key
-    paths) still come from env vars (D-018) — usernames count as identity,
-    not topology, so SAP username comes via `creds` and SSH username via
-    env, matching the SAP username's own precedent.
+    D-021: connection topology (hostname, instance_number, url_checks) lives
+    in the registry, CRUD-editable via /api/systems.
+
+    D-023: SSH credentials for app/dialog servers and DB hosts now live in
+    the registry too (encrypted at rest, engine/crypto.py) instead of env
+    vars — decrypted here, at the last moment before handing off to v1,
+    never logged or persisted. This required NO changes to v1's
+    orchestrator.py (`sap_automator.py`/`orchestrator.py` stay untouched on
+    disk, per D-017/D-019's "wrap not edit" rule): its
+    `run_ssh_filesystem_checks()` already natively walks `config["servers"]`
+    as a list of dicts with an optional `use_custom_auth` per-entry
+    override — exactly the shape D-023 needed, already present in v1's code
+    before this change. v1 only ever treats ONE db host specially
+    (`config["db_host"] or config["hostname"]`, always using the *global*
+    ssh_username/ssh_password/etc keys, no per-host override for that one
+    slot) — rather than edit that to support multiple DB hosts, every
+    registry `db_hosts` entry is folded into the same `servers` list
+    v1 already resolves per-host, and `db_host` is left empty so v1's own
+    fallback (implicit target = `hostname`, using the system's default
+    ssh_credential) is the only thing using that single-slot mechanism —
+    unchanged v1 behavior, not a regression.
     """
 
-    import os
+    from . import crypto
 
-    sid = sys_entry.sid
     host = sys_entry.hostname or (urlparse(sys_entry.webgui_url).hostname or sys_entry.webgui_url)
+
+    def resolve(cred) -> dict:
+        return {
+            "ssh_auth_method": cred.auth_method,
+            "ssh_username": cred.username,
+            "ssh_password": crypto.decrypt(cred.password_enc) if cred.auth_method == "password" else "",
+            "ssh_key_path": cred.key_path,
+        }
+
+    default_ssh = resolve(sys_entry.ssh_credential)
+
+    def server_dict(entry) -> dict:
+        r = resolve(entry.effective_credential(sys_entry.ssh_credential))
+        return {"hostname": entry.hostname, "use_custom_auth": True, **r}
+
+    servers_for_v1 = [server_dict(e) for e in (sys_entry.servers + sys_entry.db_hosts)]
 
     return {
         "hostname": host,
@@ -217,11 +246,14 @@ def build_v1_config(sys_entry, creds: dict[str, str]) -> dict:
         "sap_username": creds["user"],
         "sap_password": creds["password"],
         "webgui_url": sys_entry.webgui_url,
-        "servers": list(sys_entry.servers),
+        "servers": servers_for_v1,
         "url_checks": list(sys_entry.url_checks),
-        "ssh_username": os.environ.get(f"SAP_{sid}_SSH_USER", ""),
-        "ssh_password": os.environ.get(f"SAP_{sid}_SSH_PASSWORD", ""),
-        "ssh_auth_method": sys_entry.ssh_auth_method,
-        "ssh_key_path": os.environ.get(f"SAP_{sid}_SSH_KEY_PATH", ""),
-        "db_host": sys_entry.db_host or host,
+        "ssh_username": default_ssh["ssh_username"],
+        "ssh_password": default_ssh["ssh_password"],
+        "ssh_auth_method": default_ssh["ssh_auth_method"],
+        "ssh_key_path": default_ssh["ssh_key_path"],
+        # D-023: DB hosts now flow through `servers` above (per-host creds);
+        # leaving this blank makes v1 fall back to its one implicit
+        # `hostname` target using the default ssh_credential resolved above.
+        "db_host": "",
     }
