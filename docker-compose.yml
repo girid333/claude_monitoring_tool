@@ -1,0 +1,42 @@
+# D-022. `docker compose up --build` from this directory runs the whole
+# app. Podman: `podman compose up --build` (or `podman-compose`) works
+# against this same file unchanged — nothing here is Docker-specific.
+#
+# Credentials (D-018) are intentionally NOT set here. Put them in a
+# .env file next to this compose file (gitignored) or export them in your
+# shell before running compose; either way they reach the backend via the
+# `env_file`/environment passthrough below. Never bake them into the image.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: claude-monitoring-backend:local
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/data
+    environment:
+      - CORS_ORIGINS=http://localhost:3000
+      # SAP_<SID>_USER / SAP_<SID>_PASSWORD / SAP_<SID>_SSH_* (D-018):
+      # define these in a .env file (docker compose loads it automatically)
+      # rather than listing them individually here.
+    env_file:
+      - path: ./.env
+        required: false
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API: http://localhost:8000
+    image: claude-monitoring-frontend:local
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  backend_data:

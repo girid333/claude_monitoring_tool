@@ -8,11 +8,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutGrid, PlayCircle, Radar, FileText } from "lucide-react";
+import { LayoutGrid, PlayCircle, Radar, FileText, Server } from "lucide-react";
 import type { ReactNode } from "react";
 
 const NAV = [
   { href: "/", label: "Landscape", icon: LayoutGrid },
+  { href: "/systems", label: "Systems", icon: Server },
   { href: "/runs", label: "Runs", icon: PlayCircle },
   { href: "/recorder", label: "Recorder", icon: Radar },
   { href: "/reports", label: "Reports", icon: FileText },

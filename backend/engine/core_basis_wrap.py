@@ -192,35 +192,36 @@ def load_v1_orchestrator(v1_path: str | Path):
 
 
 def build_v1_config(sys_entry, creds: dict[str, str]) -> dict:
-    """Map a v2 SystemEntry (registry.py, D-006) + credentials (D-018) into
-    the flat config dict v1's ReportOrchestrator expects.
+    """Map a v2 SystemEntry (registry.py, D-006/D-021) + credentials (D-018)
+    into the flat config dict v1's ReportOrchestrator expects.
 
-    The v2 registry deliberately holds no hostname/instance/server-topology
-    fields (systems.json shape is final per D-018) and no credentials, so:
-      - RFC connection host is derived from webgui_url's hostname, override
-        via SAP_<SID>_RFC_HOST if the RFC endpoint differs from WebGUI's.
-      - instance_number/ssh/db_host are optional env-var overrides; v1
-        already no-ops gracefully (skips, doesn't crash) when these are
-        blank (see orchestrator.run_ssh_filesystem_checks / run_external_checks).
+    D-021 superseded this function's original design: connection topology
+    (hostname, instance_number, db_host, servers, url_checks,
+    ssh_auth_method) now lives in the registry itself, CRUD-editable via
+    /api/systems, rather than only being reachable through undocumented
+    env-var overrides. Only genuine secrets (usernames, passwords, key
+    paths) still come from env vars (D-018) — usernames count as identity,
+    not topology, so SAP username comes via `creds` and SSH username via
+    env, matching the SAP username's own precedent.
     """
 
     import os
 
     sid = sys_entry.sid
-    host = urlparse(sys_entry.webgui_url).hostname or sys_entry.webgui_url
+    host = sys_entry.hostname or (urlparse(sys_entry.webgui_url).hostname or sys_entry.webgui_url)
 
     return {
-        "hostname": os.environ.get(f"SAP_{sid}_RFC_HOST", host),
-        "instance_number": os.environ.get(f"SAP_{sid}_INSTANCE", "00"),
+        "hostname": host,
+        "instance_number": sys_entry.instance_number or "00",
         "sap_client": sys_entry.client,
         "sap_username": creds["user"],
         "sap_password": creds["password"],
         "webgui_url": sys_entry.webgui_url,
-        "servers": [],
-        "url_checks": [],
+        "servers": list(sys_entry.servers),
+        "url_checks": list(sys_entry.url_checks),
         "ssh_username": os.environ.get(f"SAP_{sid}_SSH_USER", ""),
         "ssh_password": os.environ.get(f"SAP_{sid}_SSH_PASSWORD", ""),
-        "ssh_auth_method": os.environ.get(f"SAP_{sid}_SSH_AUTH_METHOD", "password"),
+        "ssh_auth_method": sys_entry.ssh_auth_method,
         "ssh_key_path": os.environ.get(f"SAP_{sid}_SSH_KEY_PATH", ""),
-        "db_host": os.environ.get(f"SAP_{sid}_DB_HOST", ""),
+        "db_host": sys_entry.db_host or host,
     }

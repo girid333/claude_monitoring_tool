@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+runs.db
+runs.db-journal
+systems.json
+reports/
+run_artifacts/
+.env
+*.local.json
+storage_state*.json

@@ -1,7 +1,11 @@
 """FastAPI backend — the D-016 API surface the frontend needs.
 
 Endpoints:
-  GET  /api/systems                       registry + last-run summary per system
+  GET    /api/systems                     registry + last-run summary + credential status
+  POST   /api/systems                     create a system (D-021, no credential fields)
+  PUT    /api/systems/{sid}               update a system
+  DELETE /api/systems/{sid}               remove a system
+  GET    /api/systems/{sid}/credentials   presence-only credential check + env var hint
   POST /api/run                           start a run (background) -> {run_id}
   GET  /api/events/{run_id}               SSE stream of per-step/per-flow/report events
   GET  /api/runs?sid=                     recent flow run history (RunStore)
@@ -27,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -35,15 +40,45 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from engine.registry import EnvCredentialProvider, Registry
+from engine.registry import EnvCredentialProvider, Registry, SystemEntry, credential_status
 from engine.store import RunStore
 
+# D-022 (containerization): all three are plain relative paths by default,
+# resolved against the process's CWD — exactly what makes the container's
+# `WORKDIR /data` + `--app-dir /app` split work without touching a line of
+# this logic (see backend/Dockerfile). The env vars are an explicit override
+# on top of that, for anyone who'd rather not rely on the CWD trick.
+SYSTEMS_PATH = os.environ.get("SYSTEMS_PATH", "systems.json")
+RUNS_DB_PATH = os.environ.get("RUNS_DB_PATH", "runs.db")
+
+# D-022: recording (Phase 2 UI) needs a real display (headless=False,
+# D-020b) — impossible in a container. Rather than let it fail with a raw
+# Playwright "no display" error, HEADLESS_DEPLOYMENT=1 (set in the
+# Dockerfile) makes every /api/recorder/* call return a clear, actionable
+# 501 instead.
+HEADLESS_DEPLOYMENT = os.environ.get("HEADLESS_DEPLOYMENT") == "1"
+
+# D-022: CORS origins configurable — the hardcoded localhost:3000 only
+# works for local dev; a containerized frontend is reachable at whatever
+# host ECS/the reverse proxy puts it behind.
+_cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",")
+
 app = FastAPI(title="Claude Monitoring Tool")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000"],
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_methods=["*"], allow_headers=["*"])
 
-store = RunStore("runs.db")
+store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}
+
+
+def _require_display() -> None:
+    if HEADLESS_DEPLOYMENT:
+        raise HTTPException(
+            501,
+            "Recording requires a local machine with a real display "
+            "(D-004/D-020b) and is disabled in this headless/container "
+            "deployment (D-022). Run the backend locally "
+            "(uvicorn main:app) to use the Recorder.")
 
 
 class RunRequest(BaseModel):
@@ -75,13 +110,77 @@ async def emit(run_id: str, event: dict) -> None:
 
 @app.get("/api/systems")
 def systems() -> list[dict]:
-    reg = Registry.load("systems.json")
+    reg = Registry.load(SYSTEMS_PATH)
     out = []
     for s in reg.systems:
         recent = store.recent(sid=s.sid, limit=1)
         out.append({**s.model_dump(),
-                    "last_run": recent[0] if recent else None})
+                    "last_run": recent[0] if recent else None,
+                    "credentials": credential_status(s.sid, s.ssh_auth_method)})
     return out
+
+
+@app.post("/api/systems")
+def create_system(entry: SystemEntry) -> SystemEntry:
+    """D-021: replaces hand-editing systems.json. Registry only ever holds
+    non-secret connection topology (D-006/D-018/D-021) — credentials are
+    never accepted here; set SAP_<SID>_USER/PASSWORD (+ SSH equivalents)
+    as environment variables on the machine running this backend."""
+    reg = Registry.load(SYSTEMS_PATH)
+    try:
+        reg.get(entry.sid)
+        raise HTTPException(409, f"system {entry.sid!r} already exists — use PUT to update it")
+    except KeyError:
+        pass
+    reg.upsert(entry)
+    reg.save(SYSTEMS_PATH)
+    return entry
+
+
+@app.put("/api/systems/{sid}")
+def update_system(sid: str, entry: SystemEntry) -> SystemEntry:
+    if entry.sid != sid:
+        raise HTTPException(400, "body sid must match the URL sid")
+    reg = Registry.load(SYSTEMS_PATH)
+    try:
+        reg.get(sid)
+    except KeyError:
+        raise HTTPException(404, f"unknown sid {sid!r}")
+    reg.upsert(entry)
+    reg.save(SYSTEMS_PATH)
+    return entry
+
+
+@app.delete("/api/systems/{sid}")
+def delete_system(sid: str) -> dict:
+    reg = Registry.load(SYSTEMS_PATH)
+    if not reg.remove(sid):
+        raise HTTPException(404, f"unknown sid {sid!r}")
+    reg.save(SYSTEMS_PATH)
+    return {"deleted": sid}
+
+
+@app.get("/api/systems/{sid}/credentials")
+def system_credentials(sid: str) -> dict:
+    """Presence-only check (never returns values) so the Systems page can
+    show a configured/missing badge and tell the user exactly which env
+    vars to set, without this API ever being able to leak a secret."""
+    reg = Registry.load(SYSTEMS_PATH)
+    try:
+        entry = reg.get(sid)
+    except KeyError:
+        raise HTTPException(404, f"unknown sid {sid!r}")
+    status = credential_status(sid, entry.ssh_auth_method)
+    return {
+        "sid": sid,
+        **status,
+        "hint": {
+            "sap": f"export SAP_{sid}_USER=... SAP_{sid}_PASSWORD=...",
+            "ssh": (f"export SAP_{sid}_SSH_USER=... SAP_{sid}_SSH_KEY_PATH=..."
+                    if entry.ssh_auth_method == "key"
+                    else f"export SAP_{sid}_SSH_USER=... SAP_{sid}_SSH_PASSWORD=..."),
+        },
+    }
 
 
 @app.post("/api/run")
@@ -145,6 +244,7 @@ def download_report(run_id: str, sid: str, kind: str) -> FileResponse:
 
 @app.post("/api/recorder/start")
 async def recorder_start(req: RecorderStartRequest) -> dict:
+    _require_display()
     from engine.recorder_service import start_recording
     try:
         session = await start_recording(req.sid)
@@ -204,7 +304,7 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
     from engine.schema import Flow
     from engine.sections import CoreBasisSection, SectionResult, build_report
 
-    reg = Registry.load("systems.json")
+    reg = Registry.load(SYSTEMS_PATH)
     creds = EnvCredentialProvider()
 
     async with async_playwright() as pw:
