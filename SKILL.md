@@ -275,12 +275,18 @@ big-bang migration).
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
 | 0 | Existing v1 tool (DOM-based BASIS monitoring + Word/PDF report) | ✅ DONE |
-| 1 | Flow schema (final) + replay engine core with **both resolvers**; hand-written flows for SM37 (ALV-heavy on purpose), ST22, SM12; capability probe; login plugins for 2 most-different systems | ⬜ NEXT |
-| 2 | Recorder (scripting event stream + DOM metadata snapshot; start/stop UI; parameter marking) | ⬜ |
-| 3 | Parameterization & datasets (JSON/Excel, runtime expressions, per-run variants) | ⬜ |
-| 4 | Verification layer (structured extraction, check types, severities) wired into anomaly detection | ⬜ |
-| 5 | Integration: sections registry; recorded flows merge into existing Word/PDF pipeline alongside v1 BASIS section | ⬜ |
-| 6 | Robustness: popup interceptor, session-loss recovery, DOM self-healing + LLM repair mode, scheduling, run history/drift | ⬜ |
+| 1 | Flow schema (final) + replay engine core with **both resolvers**; hand-written flows for SM37 (ALV-heavy on purpose), ST22, SM12; capability probe; login plugins for 2 most-different systems | 🟨 SCAFFOLDED — blocked on live systems: scripting entry-point verify, DOM ALV read, SAML plugin, ST22/SM12 flows |
+| 2 | Recorder (scripting event stream + DOM metadata snapshot; start/stop UI; parameter marking) | 🟨 SCAFFOLDED — recorder.py + inject JS; FindByPosition needs live verify; no UI yet |
+| 3 | Parameterization & datasets (JSON/Excel, runtime expressions, per-run variants) | ✅ BUILT — datasets.py (JSON + XLSX), expressions in engine; untested vs live flows |
+| 4 | Verification layer (structured extraction, check types, severities) wired into anomaly detection | ✅ BUILT — checks.py: row_count, cell_value, statusbar_type, field_value, text |
+| 5 | Integration: sections registry; recorded flows merge into existing Word/PDF pipeline alongside v1 BASIS section | 🟨 SCAFFOLDED — sections.py (FlowSection working, CoreBasisSection = documented contract for Claude Code), report bridge with severity mapping |
+| 6 | Robustness: popup interceptor, session-loss recovery, DOM self-healing + LLM repair mode, scheduling, run history/drift | 🟨 SCAFFOLDED — recovery.py, healing.py (repair-queue capture; LLM pass TODO), store.py (SQLite history); scheduler TODO |
+| 7 | Frontend per D-016 (added) | 🟨 SCAFFOLDED — Next.js app: tokens, Landscape page, Island wired to SSE; remaining views (Runs/Recorder/Reports) TODO |
+
+Legend: ✅ done · 🟨 scaffolded (code exists, needs live-system work or v1
+context to finish) · ⬜ not started.
+Backend API (main.py): /api/systems, /api/run, /api/events (SSE), /api/runs
+— the D-016 API surface exists end to end.
 
 Note (per D-003): DOM resolver work that was originally sketched as "Phase 6
 robustness" is pulled forward — a first working DOM resolver ships in Phase 1;
@@ -472,6 +478,18 @@ zip; all real content lives in the generated Word/PDF.
   registry (v1 stores plaintext in SQLite) — must be decided before Phase 1
   builds the registry schema.
 
+**D-018 (2026-08-01) — Interim credential handling + self-healing safety principle.**
+(a) Until OQ-8 is decided, credentials flow ONLY through the
+CredentialProvider interface; the interim EnvCredentialProvider reads
+SAP_<SID>_USER / SAP_<SID>_PASSWORD env vars — no secrets in files or the
+registry. This is a stopgap, not the OQ-8 resolution. The systems.json
+registry shape (no credential fields) IS final.
+(b) Self-healing never self-modifies flows mid-run: failed DOM resolutions
+produce repair items (screenshot + trimmed DOM + target) in a repair queue;
+an out-of-band pass proposes fixes; a human (or supervised session) applies
+them to flow files, so git diffs remain the audit trail and replay stays
+deterministic.
+
 ---
 
 ## 8. Session Log
@@ -513,6 +531,22 @@ constraint, derived API requirements: SSE run events, per-system status,
 severity chips) and D-017 (v1 orchestrator wrapped as Core BASIS section
 provider; automator untouched; only v1's frontend page replaced). Mockup to
 be committed to the repo as the design reference for the frontend rebuild.
+
+**2026-08-01 — Session 5 (phases 2–7 scaffold build, Claude.ai).** Built:
+checks.py (all Phase 4 check types), datasets.py (JSON+XLSX), registry.py
+(systems.json shape final, EnvCredentialProvider interim per D-018),
+recovery.py (popup rules + with_recovery re-login wrapper), healing.py
+(repair-queue capture per D-018b), store.py (SQLite run history),
+sections.py (FlowSection working; CoreBasisSection = precise contract
+docstring for Claude Code + report bridge with severity mapping),
+recorder/recorder.py (inject JS: FindByPosition→scripting ID + DOM metadata
+snapshot, event coalescing — needs live verify), engine/run.py CLI,
+main.py (FastAPI: systems/run/SSE events/history — D-016 API surface),
+frontend/ (Next.js: tokens css, Landscape page with Island on SSE).
+Phase table updated with SCAFFOLDED statuses. Repo pushed to GitHub
+(girid333/claude_monitoring_tool). Next: live-system work per README
+checklist; CoreBasisSection wrap in Claude Code; reference SIDs (OQ-2) and
+OQ-8 still open.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

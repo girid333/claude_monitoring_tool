@@ -1,0 +1,10 @@
+{
+  "systems": [
+    { "sid": "Q4H", "webgui_url": "https://q4hhost:44300/sap/bc/gui/sap/its/webgui",
+      "client": "100", "release_tag": "S4_2023", "auth": "saml",
+      "tags": ["reference", "recording"], "rfc_enrichment": false },
+    { "sid": "ECP", "webgui_url": "https://ecphost:8443/sap/bc/gui/sap/its/webgui",
+      "client": "300", "release_tag": "ECC6_EHP8", "auth": "basic",
+      "tags": ["reference"], "rfc_enrichment": true }
+  ]
+}

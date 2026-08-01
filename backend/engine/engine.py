@@ -17,11 +17,11 @@ from typing import Any
 
 from playwright.async_api import Page
 
+from .checks import evaluate as evaluate_check
 from .resolvers.base import CONFIDENCE_FLAG_THRESHOLD, Resolver
 from .resolvers.dom import DomResolver
 from .resolvers.scripting import ScriptingResolver
-from .schema import (Act, CheckOp, CheckResult, Flow, FlowRunResult, Severity,
-                     Step, StepResult)
+from .schema import Act, Flow, FlowRunResult, Step, StepResult
 from .sync import wait_ready
 
 _PARAM_RE = re.compile(r"\{\{(\w+)([+-]\d+)?\}\}")
@@ -141,32 +141,11 @@ class ReplayEngine:
 
     def _check(self, i: int, step: Step, last_capture: dict,
                result: FlowRunResult) -> StepResult:
-        severity = step.severity or Severity.MEDIUM
-        actual: Any = None
-        if step.type == "row_count":
-            actual = len(last_capture.get("table", []))
-        elif step.type == "statusbar_type":
-            actual = last_capture.get("statusbar", {}).get("type", "")
-        # cell_value / field_value / text: Phase 4 (verification layer)
-
-        ok = _compare(actual, step.op or CheckOp.EQ, step.value)
-        result.checks.append(CheckResult(ok=ok, severity=severity,
-                                         message=step.message or "",
-                                         actual=actual, expected=step.value))
+        cr = evaluate_check(step, last_capture)
+        result.checks.append(cr)
         return StepResult(index=i, act=step.act, ok=True,
-                          detail=f"check {'passed' if ok else 'FAILED'}: "
-                                 f"{actual} {step.op} {step.value}")
-
-
-def _compare(actual: Any, op: CheckOp, expected: Any) -> bool:
-    if op == CheckOp.EQ: return actual == expected
-    if op == CheckOp.NE: return actual != expected
-    if op == CheckOp.LT: return actual < expected
-    if op == CheckOp.GT: return actual > expected
-    if op == CheckOp.CONTAINS: return expected in (actual or "")
-    if op == CheckOp.NOT_CONTAINS: return expected not in (actual or "")
-    if op == CheckOp.REGEX: return re.search(str(expected), str(actual or "")) is not None
-    return False
+                          detail=f"check {'passed' if cr.ok else 'FAILED'}: "
+                                 f"{cr.actual} {step.op} {step.value}")
 
 
 def _okcode_target():
