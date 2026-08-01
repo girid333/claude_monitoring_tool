@@ -548,5 +548,26 @@ Phase table updated with SCAFFOLDED statuses. Repo pushed to GitHub
 checklist; CoreBasisSection wrap in Claude Code; reference SIDs (OQ-2) and
 OQ-8 still open.
 
+**2026-08-01 — Session 6 (handoff to Cowork, Claude.ai).** Giri is moving
+day-to-day work to Cowork (Claude Desktop) pointed at
+`/Users/giri/Antigravity`, which contains BOTH repos: `claude_monitoring_tool`
+(v2, this project) and `sap_monitoring` (v1). Phases 2–7 zip extracted into
+the local repo and pushed to GitHub (girid333/claude_monitoring_tool) — the
+git repo is now the single source of truth; no more zip round-trips.
+**Instructions for the first Cowork session (and any local session):**
+(1) Read `claude_monitoring_tool/SKILL.md` (this file) + `README.md` fully
+before doing anything. (2) Priority tasks, in order: wrap the v1
+orchestrator as CoreBasisSection per the contract docstring in
+`backend/engine/sections.py` (do NOT modify v1's `sap_automator.py`);
+build the recorder start/stop UI; remaining frontend views (Runs, Recorder,
+Reports) per `design/mockup.html` + D-016 tokens. (3) Live-system tasks
+(blocked on OQ-2 reference SIDs): verify scripting JS entry points
+(`resolvers/scripting.py` `_SESSION_JS`, recorder `FindByPosition`), DOM
+ALV table read via the SM37 flow, SAML login plugin. (4) End EVERY session
+by appending a dated entry here and committing SKILL.md. (5) Blockers only
+Giri can resolve: OQ-2 (two reference SIDs + MFA-exemption confirmation)
+and OQ-8 (credential encryption-at-rest; interim = env vars per D-018 —
+never write plaintext secrets to any file).
+
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*
