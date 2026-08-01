@@ -11,7 +11,7 @@ import { apiBase } from "./lib/api";
 const API = apiBase();
 
 type SystemRow = {
-  sid: string; release_tag: string; auth: string; tags: string[];
+  sid: string; system_name?: string; release_tag: string; auth: string; tags: string[];
   last_run: { ok: boolean; flow_id: string; checks: { ok: boolean; severity: string }[] } | null;
 };
 type IslandEvent = { type: string; sid?: string; flow_id?: string; ok?: boolean };
@@ -145,7 +145,7 @@ export default function Landscape() {
                 <div>
                   <div style={{ fontSize: 22, fontWeight: 700 }}>{s.sid}</div>
                   <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>
-                    {s.release_tag} · {s.auth.toUpperCase()}
+                    {s.system_name ? `${s.system_name} · ` : ""}{s.release_tag} · {s.auth.toUpperCase()}
                   </div>
                 </div>
                 <span style={{

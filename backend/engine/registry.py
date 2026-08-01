@@ -86,6 +86,7 @@ class ServerEntry(BaseModel):
 
 class SystemEntry(BaseModel):
     sid: str
+    system_name: str = ""             # D-027: v1-parity display name (defaults to SID in UI)
     webgui_url: str
     client: str
     release_tag: str = "UNKNOWN"      # set from probe (e.g. "S4_2023")

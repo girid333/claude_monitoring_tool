@@ -53,6 +53,10 @@ export default function Reports() {
                    href={`${API}/api/reports/${r.run_id}/${r.sid}/download/pdf`}
                    style={{ textDecoration: "none" }}>PDF</a>
               )}
+              <a className="btn secondary"
+                 href={`${API}/api/reports/${r.run_id}/download/zip`}
+                 title="All reports from this run (every system), zipped — v1's 'Download All Reports (ZIP)'"
+                 style={{ textDecoration: "none" }}>ZIP</a>
             </div>
           </div>
         ))}

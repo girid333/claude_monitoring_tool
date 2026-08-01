@@ -12,6 +12,7 @@ Endpoints:
   GET  /api/runs/core-basis?sid=          recent Core BASIS section run history (D-017)
   GET  /api/reports?sid=                  recent generated Word/PDF reports (D-014)
   GET  /api/reports/{run_id}/{sid}/download/{docx|pdf}   fetch a generated report file
+  GET  /api/reports/{run_id}/download/zip  all reports for a run bundled (v1's "Download All Reports (ZIP)", D-027)
   POST /api/recorder/start                {sid} -> open a headed browser + start recording (D-004)
   GET  /api/recorder/status/{recording_id}  live event count for the Recorder page
   GET  /api/recorder/active               all in-progress recording sessions
@@ -127,6 +128,7 @@ class SystemIn(BaseModel):
     shape the registry actually stores."""
 
     sid: str
+    system_name: str = ""   # D-027: v1-parity display name
     webgui_url: str
     client: str
     release_tag: str = "UNKNOWN"
@@ -191,7 +193,8 @@ def _to_stored(sys_in: SystemIn, existing: SystemEntry | None) -> SystemEntry:
         sys_in.sap_credential, existing.sap_credential if existing else None)
 
     return SystemEntry(
-        sid=sys_in.sid, webgui_url=sys_in.webgui_url, client=sys_in.client,
+        sid=sys_in.sid, system_name=sys_in.system_name,
+        webgui_url=sys_in.webgui_url, client=sys_in.client,
         release_tag=sys_in.release_tag, auth=sys_in.auth, tags=sys_in.tags,
         rfc_enrichment=sys_in.rfc_enrichment, hostname=sys_in.hostname,
         instance_number=sys_in.instance_number, url_checks=sys_in.url_checks,
@@ -363,6 +366,26 @@ def core_basis_runs(sid: str | None = None, limit: int = 20) -> list[dict]:
 @app.get("/api/reports")
 def reports(sid: str | None = None, limit: int = 20) -> list[dict]:
     return store.recent_reports(sid=sid, limit=limit)
+
+
+@app.get("/api/reports/{run_id}/download/zip")
+def download_reports_zip(run_id: str) -> FileResponse:
+    """D-027: v1-parity 'Download All Reports (ZIP)' — every docx/pdf this
+    run generated, across all its systems, in one archive. v1 bundled the
+    whole batch's output the same way (`/api/download/zip`)."""
+    import zipfile
+
+    rows = [r for r in store.recent_reports(limit=500) if r["run_id"] == run_id]
+    files = [Path(r[k]) for r in rows for k in ("docx_path", "pdf_path")
+             if r.get(k) and Path(r[k]).exists()]
+    if not files:
+        raise HTTPException(404, "no report files found for this run")
+    zip_path = Path("reports") / f"{run_id}_all_reports.zip"
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for f in files:
+            zf.write(f, f.name)
+    return FileResponse(zip_path, filename=f"SAP_Reports_{run_id}.zip")
 
 
 @app.get("/api/reports/{run_id}/{sid}/download/{kind}")

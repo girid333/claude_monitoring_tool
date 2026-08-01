@@ -55,7 +55,8 @@ type HostForm = {
 };
 
 type SystemForm = {
-  sid: string; webgui_url: string; client: string; release_tag: string;
+  sid: string; system_name: string;
+  webgui_url: string; client: string; release_tag: string;
   auth: string; tags: string[]; rfc_enrichment: boolean;
   hostname: string; instance_number: string; url_checks: string[];
   servers: HostForm[];
@@ -68,7 +69,8 @@ type CredentialOut = { auth_method: string; username: string; key_path: string; 
 type SapCredentialOut = { username: string; password_set: boolean };
 type HostOut = { hostname: string; credential: CredentialOut };
 type SystemRow = {
-  sid: string; webgui_url: string; client: string; release_tag: string;
+  sid: string; system_name: string;
+  webgui_url: string; client: string; release_tag: string;
   auth: string; tags: string[]; rfc_enrichment: boolean;
   hostname: string; instance_number: string; url_checks: string[];
   servers: HostOut[]; db_hosts: HostOut[]; ssh_credential: CredentialOut;
@@ -79,7 +81,8 @@ type SystemRow = {
 };
 
 const EMPTY: SystemForm = {
-  sid: "", webgui_url: "", client: "", release_tag: "UNKNOWN", auth: "basic",
+  sid: "", system_name: "",
+  webgui_url: "", client: "", release_tag: "UNKNOWN", auth: "basic",
   tags: [], rfc_enrichment: false, hostname: "", instance_number: "00",
   url_checks: [], servers: [], db_hosts: [], ssh_credential: { ...EMPTY_CRED },
   sap_credential: { ...EMPTY_SAP_CRED },
@@ -101,7 +104,8 @@ function hostOutToForm(h: HostOut): HostForm {
 
 function rowToForm(s: SystemRow): SystemForm {
   return {
-    sid: s.sid, webgui_url: s.webgui_url, client: s.client, release_tag: s.release_tag,
+    sid: s.sid, system_name: s.system_name ?? "",
+    webgui_url: s.webgui_url, client: s.client, release_tag: s.release_tag,
     auth: s.auth, tags: s.tags, rfc_enrichment: s.rfc_enrichment,
     hostname: s.hostname, instance_number: s.instance_number, url_checks: s.url_checks,
     servers: s.servers.map(hostOutToForm),
@@ -120,7 +124,8 @@ function formToBody(f: SystemForm) {
   });
   const host = (h: HostForm) => ({ hostname: h.hostname, credential: h.override ? cred(h.credential) : null });
   return {
-    sid: f.sid, webgui_url: f.webgui_url, client: f.client, release_tag: f.release_tag,
+    sid: f.sid, system_name: f.system_name,
+    webgui_url: f.webgui_url, client: f.client, release_tag: f.release_tag,
     auth: f.auth, tags: f.tags, rfc_enrichment: f.rfc_enrichment,
     hostname: f.hostname, instance_number: f.instance_number, url_checks: f.url_checks,
     servers: f.servers.map(host), db_hosts: f.db_hosts.map(host),
@@ -293,8 +298,8 @@ export default function Systems() {
           return (
             <div className="row" key={s.sid}>
               <div className="grow">
-                <div className="rtitle">{s.sid} <span style={{ color: "var(--text-3)", fontWeight: 400 }}>
-                  · {s.release_tag} · {s.auth}</span></div>
+                <div className="rtitle">{s.system_name || s.sid} <span style={{ color: "var(--text-3)", fontWeight: 400 }}>
+                  {s.system_name ? `· ${s.sid} ` : ""}· {s.release_tag} · {s.auth}</span></div>
                 <div className="rsub">{s.webgui_url}</div>
                 <div style={{ marginTop: 6 }}>
                   <span className={s.credentials.sap_credentials ? "badge-ok" : "badge-missing"}>
@@ -332,9 +337,16 @@ export default function Systems() {
 
             {error && <div style={{ color: "var(--red)", fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
 
+            <div className="field-group">
+              <label className="field-label">System name (display only, e.g. &quot;Production ERP&quot;)</label>
+              <input className="input" style={{ width: "100%" }} value={form.system_name}
+                     onChange={e => setForm({ ...form, system_name: e.target.value })}
+                     placeholder="defaults to SID" />
+            </div>
+
             <div className="field-row">
               <div className="field-group">
-                <label className="field-label">SID</label>
+                <label className="field-label">SID {editingSid ? "(locked — SID is the system's identifier and can't change after creation)" : ""}</label>
                 <input className="input" style={{ width: "100%" }} value={form.sid} disabled={!!editingSid}
                        onChange={e => setForm({ ...form, sid: e.target.value.toUpperCase() })} placeholder="Q4H" />
               </div>
