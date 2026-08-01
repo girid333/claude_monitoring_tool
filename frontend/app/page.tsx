@@ -63,7 +63,7 @@ export default function Landscape() {
     [islandEvents]);
 
   return (
-    <main style={{ maxWidth: 1100, margin: "0 auto", padding: "26px 24px 48px" }}>
+    <div style={{ maxWidth: 1100 }}>
       {/* Dynamic Island */}
       {runId && (
         <div style={{ display: "flex", justifyContent: "center", marginBottom: 30 }}>
@@ -144,6 +144,6 @@ export default function Landscape() {
           );
         })}
       </div>
-    </main>
+    </div>
   );
 }

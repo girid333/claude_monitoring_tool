@@ -83,13 +83,60 @@ class CoreBasisSection(Section):
     section_id = "core_basis"
     title = "Core BASIS"
 
-    def __init__(self, v1_path: str | Path = "../sap_monitoring"):
+    def __init__(self, v1_path: str | Path = "../../sap_monitoring",
+                 registry_path: str | Path = "systems.json"):
+        # Verified 2026-08-01 against the real Antigravity layout: main.py
+        # runs `uvicorn main:app` from claude_monitoring_tool/backend/, and
+        # sap_monitoring is a sibling of claude_monitoring_tool, i.e. two
+        # levels up from backend/, not one. The scaffold's original
+        # "../sap_monitoring" default resolved to a nonexistent
+        # claude_monitoring_tool/sap_monitoring — fixed here.
         self.v1_path = Path(v1_path)
+        self.registry_path = registry_path
 
     async def run(self, engine: ReplayEngine, run_id: str, sid: str) -> SectionResult:
-        raise NotImplementedError(
-            "Wrap v1 orchestrator per the contract in this class's docstring "
-            "(needs ../sap_monitoring in context — Claude Code task).")
+        result = SectionResult(self.section_id, self.title, ok=True)
+
+        from .core_basis_wrap import ResilientRfcClient, build_v1_config, load_v1_orchestrator
+        from .registry import EnvCredentialProvider, Registry
+
+        try:
+            reg = Registry.load(self.registry_path)
+            sys_entry = reg.get(sid)
+            creds = EnvCredentialProvider().get(sid)
+        except Exception as exc:
+            result.ok = False
+            result.notes.append(f"Core BASIS skipped: {exc}")
+            return result
+
+        try:
+            orchestrator_mod = load_v1_orchestrator(self.v1_path)
+        except Exception as exc:
+            result.ok = False
+            result.notes.append(
+                f"Core BASIS skipped: could not import v1 orchestrator ({exc})")
+            return result
+
+        config = build_v1_config(sys_entry, creds)
+        ResilientRfcClient.reset_log()
+        orch = orchestrator_mod.ReportOrchestrator(config)
+
+        try:
+            v1_results = await orch.generate_report()
+        except Exception as exc:
+            result.ok = False
+            result.notes.append(f"Core BASIS run failed: {exc}")
+            return result
+
+        if not ResilientRfcClient.any_available():
+            result.notes.append(
+                "RFC enrichment unavailable this run (D-013): WebGUI-only "
+                "monitoring completed; RFC-only T-codes report 'RFC Error' "
+                "in their anomaly list instead of blocking the run.")
+
+        result.v1_results = v1_results
+        result.ok = len(v1_results.get("anomalies", [])) == 0
+        return result
 
 
 # ── Report bridge (D-014) ────────────────────────────────────────────────
@@ -103,8 +150,7 @@ def flow_results_to_report_rows(results: list[FlowRunResult]) -> list[dict]:
 
     Target shape mirrors what report_generator.py builds per T-code today
     (title, screenshots, anomaly list) PLUS severity — the field the v1
-    template lacks. Claude Code: extend report_generator.py to render
-    `severity` as chips/colors per D-016, keeping A3-landscape layout.
+    template lacks.
     """
     rows = []
     for fr in results:
@@ -127,3 +173,41 @@ def flow_results_to_report_rows(results: list[FlowRunResult]) -> list[dict]:
             "error": fr.error,
         })
     return rows
+
+
+def build_report(section_results: list[SectionResult], output_dir: str = "reports",
+                  cover_image_path: str | None = None) -> dict[str, str]:
+    """D-014 (done): assemble the actual report_composer.ReportGenerator call
+    from a run's SectionResults, whatever mix of CoreBasisSection/FlowSection
+    ran. Returns {"docx": path, "pdf": path}.
+
+    At most one CoreBasisSection's v1_results feeds the Core BASIS section
+    (v1's shape isn't designed for more than one system's data per report);
+    every FlowSection's flow_results become one "extra section" each, titled
+    by section title, so multiple functional-sanity groupings stay visually
+    separated in the output.
+    """
+    # Absolute, not relative: report_composer.py lives at backend/, a sibling
+    # of the engine/ package, not inside it (backend/ has no __init__.py).
+    # Same convention main.py already uses for `from engine.registry import
+    # ...` — backend/ is the sys.path root when the app runs (uvicorn from
+    # backend/) or in tests that insert backend/ onto sys.path. Local import
+    # here also keeps report deps (python-docx, reportlab) optional for
+    # callers that never generate a report.
+    from report_composer import ReportGenerator
+
+    v1_results: dict = {}
+    extra_sections: list[dict] = []
+    for sr in section_results:
+        if sr.v1_results is not None:
+            v1_results = sr.v1_results
+        if sr.flow_results:
+            extra_sections.append({
+                "title": sr.title,
+                "rows": flow_results_to_report_rows(sr.flow_results),
+            })
+
+    gen = ReportGenerator(v1_results, output_dir=output_dir,
+                           cover_image_path=cover_image_path,
+                           extra_sections=extra_sections)
+    return {"docx": gen.generate_word(), "pdf": gen.generate_pdf()}

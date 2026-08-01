@@ -8,3 +8,8 @@ run_artifacts/
 .env
 *.local.json
 storage_state*.json
+runs.db
+runs.db-journal
+/backend/reports/
+systems.json
+.next/

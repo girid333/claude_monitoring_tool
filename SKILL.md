@@ -207,6 +207,103 @@ T-codes, bespoke-vs-generic handler distinction made visible) and
 same report composer (D-014). Consistent with D-011 (opportunistic, not
 big-bang migration).
 
+**D-019 (2026-08-01) — CoreBasisSection wraps v1 via a monkeypatched RFC
+proxy, not a duplicated loop; v1_path default was wrong and is fixed.**
+Implementing D-017's contract surfaced two problems no prior session had hit
+because nothing had actually tried to import v1 from v2 yet:
+(a) `orchestrator.py` and `sap_rfc_client.py` both import `pyrfc` at module
+scope, so `import orchestrator` raises ModuleNotFoundError on any host
+without the NetWeaver RFC SDK — before a single line of v1 runs. Fixed with
+an import-time shim (`engine/core_basis_wrap.py`) that injects a throwaway
+`sap_rfc_client` stub into `sys.modules` ONLY when the real `pyrfc` can't be
+imported, purely so v1's own top-level import succeeds; it is never used to
+serve real calls.
+(b) v1's `run_sap_checks()` still raises and aborts on RFC login failure
+(the behavior D-013 demoted). Rather than duplicating v1's ~175-line
+`run_sap_checks()` to remove the `raise`, `CoreBasisSection` monkeypatches
+the module attribute `orchestrator.SAPRfcClient` (resolved dynamically at
+call time, so this is a wrap of a name binding, not an edit of v1 source) to
+`ResilientRfcClient`: a proxy whose `connect()` always returns `True` to
+v1's abort check while tracking real availability underneath, and whose
+`execute_tcode_check()`/`get_filesystem_data()` degrade to the same
+`{"status": "error", ...}` shape v1's own `extract_anomalies()` already
+renders as an "RFC Error" anomaly when unavailable. Net effect: RFC failure
+never blocks the run (D-013 honored), the 19 non-RFC T-codes get full
+WebGUI-only results, and the 4 RFC-dependent ones honestly report
+unavailability instead of silently faking data. `sap_automator.py` and
+`orchestrator.py` are untouched on disk — confirmed via mocked dry run (see
+`backend/_dryrun_core_basis.py`, kept as a permanent manual smoke test since
+no reference SID exists yet to test against a live system).
+Also fixed: `CoreBasisSection`'s default `v1_path` was `"../sap_monitoring"`,
+which resolves to a nonexistent `claude_monitoring_tool/sap_monitoring` when
+`uvicorn` runs from `backend/` (README's own documented run command).
+`sap_monitoring` is a sibling of `claude_monitoring_tool` under
+`/Users/giri/Antigravity`, i.e. two levels up from `backend/`. Corrected to
+`"../../sap_monitoring"`.
+
+**D-020 (2026-08-01) — Report composer inherits v1's rendering verbatim,
+adds a fifth section; recorder sessions are in-process/headed, not
+run_id+sid-keyed; a real sqlite3 thread-safety bug was found and fixed.**
+(a) `report_composer.py` (new, `backend/`) is v1's `report_generator.py`
+copied and refactored per D-014's three required changes — cover path now a
+constructor arg (default None), a `classify_v1_anomaly_severity()` heuristic
+grades v1's flat anomaly strings (RFC-unavailable notes graded INFO, not
+HIGH — D-013 already decided that's expected degradation, not a real
+problem), and a new "4. Functional Sanity" section renders `FlowSection`
+results with REAL severity from `CheckResult`, including a distinct warning
+when `low_confidence_steps` is non-empty (D-003's "flag mismatches, never
+guess"). All per-T-code screenshot special-casing (SM21/ST22/DB02/ST03N/
+SCC4/SMLG/SMGW/SMICM/STRUST) is copied unchanged — verified by generating a
+real docx+pdf from mock data and reading the text back out (both formats
+render correctly; kept as `_dryrun_report.py`, a standing smoke test next to
+`_dryrun_core_basis.py`). `sections.build_report()` is the glue: takes
+whatever `SectionResult`s a run produced and calls the composer. Wired into
+`main.py` — every `/api/run` that includes flows and/or Core BASIS now
+auto-generates a report at the end, tracked in a new `report_runs` table,
+downloadable via `/api/reports/{run_id}/{sid}/download/{docx|pdf}`.
+(b) Recorder sessions (Phase 2 UI) are fundamentally different from bulk
+runs: a human drives a HEADED browser window interactively (D-004), so
+`engine/recorder_service.py` keeps sessions in an in-process dict keyed by a
+random `recording_id`, NOT persisted to `RunStore`/SQLite and NOT
+`run_id+sid`-keyed like D-010's stateless engine — a half-finished
+interactive recording isn't a result worth persisting across a backend
+restart, the human just starts over. `/api/recorder/start` launches
+`headless=False` Chromium on whatever machine runs `uvicorn`; this only
+works when that machine has a display (README's "run locally" model), not a
+headless deployment. Recorder page (D-016 visual language) polls
+`/api/recorder/status/{id}` every 1.5s for a live event count + tail.
+(c) `/api/reports` crashed with `sqlite3.ProgrammingError: SQLite objects
+created in a thread can only be used in that same thread` the first time it
+was actually exercised (via FastAPI's `TestClient`) — a real, previously
+undiscovered bug in `RunStore` (session 5 scaffold): FastAPI's sync `def`
+endpoints run in a threadpool, but the `sqlite3.Connection` was created once
+at module load in the main thread. Same latent bug existed in the original
+`/api/runs`, just never triggered because nothing had called it yet. Fixed
+with `check_same_thread=False` on the connection (documented as a stopgap —
+a connection-per-request pool is the correct fix if this ever needs real
+concurrent access).
+(d) Frontend had no sidebar/navigation at all — `page.tsx` was a single
+unstyled Landscape view with no way to reach any other route even after
+building one. Added `app/components/Shell.tsx` (ports mockup.html's sidebar
+verbatim: traffic lights, app icon, nav, probe chip) wired into
+`app/layout.tsx`, plus `app/runs`, `app/recorder`, `app/reports` pages using
+shared list/row/severity CSS classes ported into `globals.css`. Also
+missing: `tsconfig.json` and the `typescript`/`@types/*` devDependencies —
+the frontend had literally never been built once; `next build` auto-
+generates these on first run, so they're now committed rather than
+regenerated silently. Verified: `next build` type-checks clean, all four
+routes (`/`, `/runs`, `/recorder`, `/reports`) serve HTTP 200 under
+`next start`.
+(e) OQ-2 progress: Giri provided a candidate reference system (`TEST` /
+`nwrhel9.techlabhome.in`, client 100) and credentials in chat. Cowork's
+sandbox network is allowlisted and cannot reach that host at all (proxy
+returns `blocked-by-allowlist`, DNS unreachable) — confirmed, not assumed.
+Credentials were not persisted anywhere. Wrote `backend/live_probe_check.py`
+— a standalone script (not part of the FastAPI app) Giri runs himself on a
+machine that can reach the host: logs in, runs the capability probe (D-005),
+screenshots the result, reports whether scripting is available. This is the
+actual mechanism to resolve OQ-2, still pending Giri running it.
+
 ---
 
 ## 3. Architecture Snapshot
@@ -276,12 +373,12 @@ big-bang migration).
 |-------|-------------|--------|
 | 0 | Existing v1 tool (DOM-based BASIS monitoring + Word/PDF report) | ✅ DONE |
 | 1 | Flow schema (final) + replay engine core with **both resolvers**; hand-written flows for SM37 (ALV-heavy on purpose), ST22, SM12; capability probe; login plugins for 2 most-different systems | 🟨 SCAFFOLDED — blocked on live systems: scripting entry-point verify, DOM ALV read, SAML plugin, ST22/SM12 flows |
-| 2 | Recorder (scripting event stream + DOM metadata snapshot; start/stop UI; parameter marking) | 🟨 SCAFFOLDED — recorder.py + inject JS; FindByPosition needs live verify; no UI yet |
+| 2 | Recorder (scripting event stream + DOM metadata snapshot; start/stop UI; parameter marking) | 🟨 SCAFFOLDED — recorder.py + inject JS; **recorder_service.py (session lifecycle) + /api/recorder/{start,stop,cancel,status,active} + Recorder page all built, D-020**; FindByPosition still needs live verify |
 | 3 | Parameterization & datasets (JSON/Excel, runtime expressions, per-run variants) | ✅ BUILT — datasets.py (JSON + XLSX), expressions in engine; untested vs live flows |
 | 4 | Verification layer (structured extraction, check types, severities) wired into anomaly detection | ✅ BUILT — checks.py: row_count, cell_value, statusbar_type, field_value, text |
-| 5 | Integration: sections registry; recorded flows merge into existing Word/PDF pipeline alongside v1 BASIS section | 🟨 SCAFFOLDED — sections.py (FlowSection working, CoreBasisSection = documented contract for Claude Code), report bridge with severity mapping |
-| 6 | Robustness: popup interceptor, session-loss recovery, DOM self-healing + LLM repair mode, scheduling, run history/drift | 🟨 SCAFFOLDED — recovery.py, healing.py (repair-queue capture; LLM pass TODO), store.py (SQLite history); scheduler TODO |
-| 7 | Frontend per D-016 (added) | 🟨 SCAFFOLDED — Next.js app: tokens, Landscape page, Island wired to SSE; remaining views (Runs/Recorder/Reports) TODO |
+| 5 | Integration: sections registry; recorded flows merge into existing Word/PDF pipeline alongside v1 BASIS section | ✅ BUILT — sections.py (FlowSection + CoreBasisSection, D-019); **report_composer.py renders both Core BASIS and Functional Sanity with severity chips into one Word+PDF report (D-014, D-020), auto-generated at the end of every `/api/run`, downloadable via `/api/reports`** |
+| 6 | Robustness: popup interceptor, session-loss recovery, DOM self-healing + LLM repair mode, scheduling, run history/drift | 🟨 SCAFFOLDED — recovery.py, healing.py (repair-queue capture; LLM pass TODO), store.py (SQLite history, **thread-safety bug found+fixed D-020**); scheduler TODO |
+| 7 | Frontend per D-016 (added) | ✅ BUILT — Next.js app: tokens, Shell/sidebar nav (was missing entirely — pages were unreachable), Landscape + Runs + Recorder + Reports pages, tsconfig/typescript devDeps added; **typechecks and builds clean (`next build`), all 4 routes verified serving 200 (D-020)**; Recorded flows/Datasets library pages still not built |
 
 Legend: ✅ done · 🟨 scaffolded (code exists, needs live-system work or v1
 context to finish) · ⬜ not started.
@@ -461,8 +558,11 @@ zip; all real content lives in the generated Word/PDF.
 - OQ-1: Final flow schema sign-off (step kinds, check types, severity scale)
   and its exact mapping into the existing Word/PDF report structure.
 - OQ-2 (narrowed by D-015): auth dimension decided — one basic-auth system +
-  one SSO/SAML system. **Still open: the concrete SIDs**, plus confirmation
-  of the MFA-exemption path for the SSO system's monitoring user.
+  one SSO/SAML system. **Candidate basic-auth system named 2026-08-01: `TEST`
+  at `nwrhel9.techlabhome.in`, client 100 (D-020e)** — not yet confirmed
+  scripting-vs-DOM; run `backend/live_probe_check.py` from a machine that can
+  reach it (Cowork's sandbox can't) to get the actual answer. Still open: the
+  SSO/SAML reference system, and MFA-exemption confirmation for that one.
 - ~~OQ-3: v1 codebase specifics~~ — **resolved 2026-07-31, see §6.**
 - OQ-4: Which functional sanity checks the first recorded sections should
   cover (candidates discussed: VA03 display dry-run, WE02 IDoc status, SM35
@@ -568,6 +668,70 @@ by appending a dated entry here and committing SKILL.md. (5) Blockers only
 Giri can resolve: OQ-2 (two reference SIDs + MFA-exemption confirmation)
 and OQ-8 (credential encryption-at-rest; interim = env vars per D-018 —
 never write plaintext secrets to any file).
+
+**2026-08-01 — Session 7 (CoreBasisSection implemented, Cowork).** First
+Cowork session picked up the Session 6 handoff (folder
+`/Users/giri/Antigravity` connected). Completed the #1 priority task:
+implemented `CoreBasisSection.run()` in `backend/engine/sections.py` per the
+D-017 contract, backed by a new `backend/engine/core_basis_wrap.py`
+(import shim + `ResilientRfcClient` proxy + v1 config builder — see D-019
+for why and how). Wired it into `main.py`: `RunRequest.include_core_basis`
+flag, `core_basis_start`/`core_basis_done` SSE events, and a new
+`core_basis_runs` SQLite table in `RunStore` (v1's raw results dict doesn't
+fit `FlowRunResult`'s schema, so it gets its own table rather than being
+force-fit — kept `store.py` free of any import on `sections.py`/`engine.py`
+so it stays importable without Playwright installed). Verified with a mocked
+dry run (`_dryrun_core_basis.py`, kept in the repo as a standing manual
+smoke test): v1 imports cleanly, RFC failure no longer aborts the run, all
+23 T-codes' screenshot+analysis pipeline runs untouched, and the section
+correctly reports `ok=False` with an anomaly count reflecting the (expected,
+honest) "RFC unavailable" entries for the 4 RFC-dependent T-codes. No
+sap_monitoring file was modified. Live-system verification (a real WebGUI +
+RFC connection) remains blocked on OQ-2 (reference SIDs) as before — this
+was a code-level integration task, not a live-system task.
+**Not done this session** (still open for #1's full completion): extending
+`report_generator.py` / `flow_results_to_report_rows` to actually render
+`SectionResult.v1_results` in the Word/PDF output (D-014's report-composer
+refactor) — right now `core_basis_runs` data is queryable via `RunStore` and
+streamed over SSE, but doesn't yet appear in a generated report. Also not
+started: the recorder start/stop UI and remaining frontend views (Runs,
+Recorder, Reports), which were priorities #2 and #3 in the Session 6
+handoff. Next: either finish the report-composer bridge for Core BASIS
+results, or move to the recorder UI — Giri to say which.
+
+**2026-08-01 — Session 8 (report bridge, recorder UI, frontend, Cowork).**
+Giri said "complete everything, let's test it out" — the three remaining
+Session 6/7 priorities plus a live test. Live test attempted first: Giri
+gave a candidate system (TEST / nwrhel9.techlabhome.in / client 100) and
+credentials in chat; confirmed via direct network test that Cowork's
+sandbox cannot reach that host (allowlist-blocked), so pivoted to building
+everything with mocked verification plus a standalone script Giri can run
+himself (`live_probe_check.py`). Completed, in order: (1) report bridge —
+`report_composer.py` inherits v1's `report_generator.py` rendering, adds
+severity chips and a Functional Sanity section, auto-runs at the end of
+`/api/run`, downloadable via new `/api/reports` endpoints; verified by
+generating and reading back a real docx+pdf. (2) Recorder start/stop —
+`recorder_service.py` (headed-browser session lifecycle) + 5 new
+`/api/recorder/*` endpoints + a Recorder page. (3) Remaining frontend views
+— Runs and Reports pages, PLUS a Shell/sidebar component that turned out to
+be entirely missing (pages built before this session were unreachable —
+there was no navigation at all), PLUS missing `tsconfig.json` and
+TypeScript devDependencies (frontend had never been built once until this
+session). Along the way found and fixed a real bug: `RunStore`'s sqlite3
+connection wasn't thread-safe against FastAPI's threadpool
+(`check_same_thread=False`), which would have crashed `/api/reports` and
+silently already affected `/api/runs`. All work verified without a live
+system: Python dry runs (`_dryrun_core_basis.py`, `_dryrun_report.py`, kept
+as smoke tests), a FastAPI `TestClient` pass over every new/changed
+endpoint, and `next build`/`next start` for the frontend (typechecks clean,
+all 4 routes return 200). Logged as D-020. **Not done / still open:**
+live-system verification of anything (scripting entry points, DOM ALV read,
+SAML login, the recorder's actual FindByPosition call) — genuinely blocked
+until Giri runs `live_probe_check.py` himself and reports back; "Recorded
+flows" and "Datasets" library pages from the mockup's sidebar were not
+built (weren't in the three requested priorities). Next: Giri runs the live
+probe script and reports results — that unblocks the real Phase 1 live-
+system checklist in README.md.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

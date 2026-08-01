@@ -30,3 +30,42 @@ body{
 .card:hover{transform:scale(1.028) translateY(-2px);border-color:var(--hairline-strong);
   box-shadow:0 22px 44px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* Ported from design/mockup.html so Runs/Recorder/Reports (D-016) share the
+   same iOS-inset-list / severity-chip vocabulary as the Landscape view. */
+.ltitle{font-size:32px;font-weight:700;letter-spacing:-.022em;margin-bottom:4px}
+.lsub{font-size:13.5px;color:var(--text-2);margin-bottom:26px}
+.lsub b{color:var(--text);font-weight:600}
+.sec-h{font-size:18px;font-weight:700;letter-spacing:-.015em;margin-bottom:12px}
+.list{
+  background:var(--panel);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+  border:1px solid var(--hairline);border-radius:var(--r-lg);overflow:hidden;max-width:820px;
+}
+.row{display:flex;align-items:center;gap:14px;padding:13px 18px;border-bottom:1px solid var(--hairline);
+  transition:background .15s ease}
+.row:last-child{border-bottom:none}
+.row:hover{background:rgba(255,255,255,.035)}
+.row .rdot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+.row .rtitle{font-size:13.5px;font-weight:600}
+.row .rsub{font-size:11.5px;color:var(--text-3)}
+.row .grow{flex:1;min-width:0}
+.sev{font-size:10.5px;font-weight:700;letter-spacing:.03em;padding:3px 9px;border-radius:999px}
+.sev.critical{color:var(--red);background:rgba(255,69,58,.12);border:1px solid rgba(255,69,58,.3)}
+.sev.high{color:var(--red);background:rgba(255,69,58,.12);border:1px solid rgba(255,69,58,.3)}
+.sev.medium{color:var(--orange);background:rgba(255,159,10,.12);border:1px solid rgba(255,159,10,.3)}
+.sev.low{color:var(--blue);background:rgba(10,132,255,.12);border:1px solid rgba(10,132,255,.3)}
+.sev.info{color:var(--text-3);background:rgba(255,255,255,.06);border:1px solid var(--hairline)}
+.sev.clean{color:var(--green);background:rgba(48,209,88,.1);border:1px solid rgba(48,209,88,.25)}
+.chev{color:var(--text-3);font-size:16px}
+.btn{
+  background:var(--blue);color:#fff;border:0;border-radius:999px;padding:7px 16px;
+  font-size:12.5px;font-weight:600;cursor:pointer;
+}
+.btn:disabled{opacity:.5;cursor:default}
+.btn.secondary{background:rgba(255,255,255,.08);color:var(--text)}
+.btn.danger{background:var(--red)}
+.input{
+  background:rgba(255,255,255,.05);border:1px solid var(--hairline);border-radius:var(--r-sm);
+  color:var(--text);font-size:13px;padding:8px 12px;font-family:inherit;
+}
+.input::placeholder{color:var(--text-3)}

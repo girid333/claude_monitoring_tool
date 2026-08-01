@@ -1,10 +1,18 @@
 """FastAPI backend — the D-016 API surface the frontend needs.
 
 Endpoints:
-  GET  /api/systems               registry + last-run summary per system
-  POST /api/run                   start a run (background) -> {run_id}
-  GET  /api/events/{run_id}       SSE stream of per-step/per-flow events
-  GET  /api/runs?sid=             recent run history (RunStore)
+  GET  /api/systems                       registry + last-run summary per system
+  POST /api/run                           start a run (background) -> {run_id}
+  GET  /api/events/{run_id}               SSE stream of per-step/per-flow/report events
+  GET  /api/runs?sid=                     recent flow run history (RunStore)
+  GET  /api/runs/core-basis?sid=          recent Core BASIS section run history (D-017)
+  GET  /api/reports?sid=                  recent generated Word/PDF reports (D-014)
+  GET  /api/reports/{run_id}/{sid}/download/{docx|pdf}   fetch a generated report file
+  POST /api/recorder/start                {sid} -> open a headed browser + start recording (D-004)
+  GET  /api/recorder/status/{recording_id}  live event count for the Recorder page
+  GET  /api/recorder/active               all in-progress recording sessions
+  POST /api/recorder/stop                 {recording_id, flow_id} -> save flows/{flow_id}.json
+  POST /api/recorder/cancel               {recording_id} -> discard, close the browser
 
 Design notes:
   - SSE (not the v1 2s global poll): the Dynamic Island subscribes here.
@@ -24,7 +32,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from engine.registry import EnvCredentialProvider, Registry
@@ -40,8 +48,23 @@ _event_queues: dict[str, asyncio.Queue] = {}
 
 class RunRequest(BaseModel):
     sids: list[str]
-    flows: list[str]                 # paths under flows/
+    flows: list[str] = []            # paths under flows/
     dataset: str | None = None
+    include_core_basis: bool = False  # D-017: also run v1's 23-T-code sweep
+
+
+class RecorderStartRequest(BaseModel):
+    sid: str
+
+
+class RecorderStopRequest(BaseModel):
+    recording_id: str
+    flow_id: str
+    description: str = ""
+
+
+class RecorderCancelRequest(BaseModel):
+    recording_id: str
 
 
 async def emit(run_id: str, event: dict) -> None:
@@ -91,6 +114,83 @@ def runs(sid: str | None = None, limit: int = 20) -> list[dict]:
     return store.recent(sid=sid, limit=limit)
 
 
+@app.get("/api/runs/core-basis")
+def core_basis_runs(sid: str | None = None, limit: int = 20) -> list[dict]:
+    return store.recent_core_basis(sid=sid, limit=limit)
+
+
+@app.get("/api/reports")
+def reports(sid: str | None = None, limit: int = 20) -> list[dict]:
+    return store.recent_reports(sid=sid, limit=limit)
+
+
+@app.get("/api/reports/{run_id}/{sid}/download/{kind}")
+def download_report(run_id: str, sid: str, kind: str) -> FileResponse:
+    if kind not in ("docx", "pdf"):
+        raise HTTPException(400, "kind must be docx or pdf")
+    rows = [r for r in store.recent_reports(sid=sid, limit=200) if r["run_id"] == run_id]
+    if not rows or not rows[0].get(f"{kind}_path"):
+        raise HTTPException(404, "report not found")
+    path = rows[0][f"{kind}_path"]
+    if not Path(path).exists():
+        raise HTTPException(404, "report file missing on disk")
+    return FileResponse(path, filename=Path(path).name)
+
+
+# ── Recorder (Phase 2, D-004) ────────────────────────────────────────────
+# A recording session is a HEADED Playwright browser a human drives
+# interactively; see engine/recorder_service.py for why this can't be a
+# background task like /api/run. Only usable when the backend runs on a
+# machine with a display (README's "run locally" model).
+
+@app.post("/api/recorder/start")
+async def recorder_start(req: RecorderStartRequest) -> dict:
+    from engine.recorder_service import start_recording
+    try:
+        session = await start_recording(req.sid)
+    except KeyError:
+        raise HTTPException(404, f"unknown sid {req.sid!r} in systems.json")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"could not start recording: {exc}")
+    return {"recording_id": session.recording_id, "sid": session.sid}
+
+
+@app.get("/api/recorder/status/{recording_id}")
+def recorder_status(recording_id: str) -> dict:
+    from engine.recorder_service import status
+    try:
+        return status(recording_id)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+
+
+@app.get("/api/recorder/active")
+def recorder_active() -> list[dict]:
+    from engine.recorder_service import list_active
+    return list_active()
+
+
+@app.post("/api/recorder/stop")
+async def recorder_stop(req: RecorderStopRequest) -> dict:
+    from engine.recorder_service import stop_recording
+    try:
+        return await stop_recording(req.recording_id, req.flow_id, req.description)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"could not stop recording: {exc}")
+
+
+@app.post("/api/recorder/cancel")
+async def recorder_cancel(req: RecorderCancelRequest) -> dict:
+    from engine.recorder_service import cancel_recording
+    try:
+        await cancel_recording(req.recording_id)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+    return {"cancelled": True}
+
+
 async def _execute_run(run_id: str, req: RunRequest) -> None:
     """Sequential per system. Emits: system_start, flow_start, step,
     flow_done, system_done, run_done."""
@@ -102,6 +202,7 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
     from engine.probe import probe
     from engine.recovery import dismiss_known_popups
     from engine.schema import Flow
+    from engine.sections import CoreBasisSection, SectionResult, build_report
 
     reg = Registry.load("systems.json")
     creds = EnvCredentialProvider()
@@ -122,6 +223,7 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
                                     "mode": pr.mode, "info": pr.session_info})
                 engine = ReplayEngine(page, pr.mode, run_id, sid,
                                       Path("run_artifacts") / run_id)
+                flow_results = []
                 for flow_path in req.flows:
                     flow = Flow(**json.loads(Path(flow_path).read_text()))
                     await emit(run_id, {"type": "flow_start", "sid": sid,
@@ -129,10 +231,36 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
                     await dismiss_known_popups(page)
                     fr = await engine.run(flow)
                     store.save(fr)
+                    flow_results.append(fr)
                     await emit(run_id, {
                         "type": "flow_done", "sid": sid, "flow_id": flow.flow_id,
                         "ok": fr.ok,
                         "failed_checks": sum(1 for c in fr.checks if not c.ok)})
+
+                section_results: list[SectionResult] = []
+                if flow_results:
+                    section_results.append(SectionResult(
+                        section_id="functional_sanity", title="Functional Sanity",
+                        ok=all(fr.ok for fr in flow_results), flow_results=flow_results))
+
+                if req.include_core_basis:
+                    await emit(run_id, {"type": "core_basis_start", "sid": sid})
+                    section = CoreBasisSection()
+                    sr = await section.run(engine, run_id, sid)
+                    anomaly_count = len((sr.v1_results or {}).get("anomalies", []))
+                    store.save_core_basis(run_id, sid, sr.ok, anomaly_count,
+                                           sr.notes, sr.v1_results or {})
+                    section_results.append(sr)
+                    await emit(run_id, {
+                        "type": "core_basis_done", "sid": sid, "ok": sr.ok,
+                        "anomaly_count": anomaly_count, "notes": sr.notes})
+
+                if section_results:
+                    await emit(run_id, {"type": "report_start", "sid": sid})
+                    report_dir = str(Path("reports") / run_id)
+                    paths = build_report(section_results, output_dir=report_dir)
+                    store.save_report(run_id, sid, paths.get("docx"), paths.get("pdf"))
+                    await emit(run_id, {"type": "report_ready", "sid": sid, **paths})
             except Exception as exc:  # noqa: BLE001
                 await emit(run_id, {"type": "system_error", "sid": sid,
                                     "error": repr(exc)})
