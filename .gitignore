@@ -13,3 +13,4 @@ runs.db-journal
 /backend/reports/
 systems.json
 .next/
+*.tsbuildinfo

@@ -1,19 +1,15 @@
 # D-022: containerized frontend, multi-stage — mirrors v1's proven pattern
-# (sap_monitoring/frontend/Dockerfile) with one deliberate difference: `npm
-# install` instead of `npm ci`, because no package-lock.json is committed
-# yet (this app has never been through a local `npm install` in this repo).
-# `npm ci` requires a lockfile to be present in the build context and will
-# fail without one. Run `npm install` once locally and commit the resulting
-# package-lock.json to switch this back to `npm ci` for reproducible builds
-# (see DEPLOY.md).
+# (sap_monitoring/frontend/Dockerfile). `package-lock.json` is now committed
+# (generated + verified via a real `npm install` + `next build` while
+# building D-023), so this uses `npm ci` for reproducible builds.
 
 FROM node:20-alpine AS base
 
 FROM base AS deps
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+COPY package.json package-lock.json ./
+RUN npm ci
 
 FROM base AS builder
 WORKDIR /app

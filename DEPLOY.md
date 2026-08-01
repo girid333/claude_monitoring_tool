@@ -44,18 +44,8 @@ persists in the `backend_data` named volume across restarts. First boot
 seeds it with the one example flow (`sm37_cancelled_jobs.json`) and dataset
 shipped in the image.
 
-### First lockfile generation (do this once)
-
-No `package-lock.json` is committed yet, so `frontend/Dockerfile` currently
-runs `npm install` instead of `npm ci`. For reproducible builds, run once
-locally and commit the result:
-
-```bash
-cd frontend && npm install   # generates package-lock.json
-```
-
-Then in `frontend/Dockerfile`, swap the `deps` stage's `npm install` for
-`npm ci` (also `COPY package.json package-lock.json ./`).
+`frontend/package-lock.json` is committed, so `frontend/Dockerfile` uses
+`npm ci` for reproducible builds — no extra setup needed.
 
 ## Plain Docker (no compose)
 
