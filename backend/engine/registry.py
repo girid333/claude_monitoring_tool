@@ -39,6 +39,22 @@ from pydantic import BaseModel, Field
 from .login.base import CredentialProvider
 
 
+class SapCredential(BaseModel):
+    """D-025: SAP WebGUI login credential, encrypted at rest — supersedes
+    D-018 for SAP login too (D-018 already superseded for SSH creds by
+    D-023; Giri asked for the same UI-entry treatment here after finding
+    v1's Add System form had SAP Username/Password fields v2's didn't).
+    Always username+password (no key-based option — SAP logon doesn't
+    support SSH-style key auth), so this is deliberately simpler than
+    ServerCredential (no auth_method/key_path)."""
+
+    username: str = ""
+    password_enc: str = ""
+
+    def is_set(self) -> bool:
+        return bool(self.username and self.password_enc)
+
+
 class ServerCredential(BaseModel):
     """D-023: an SSH credential, encrypted at rest. `password_enc` is a
     Fernet ciphertext (engine/crypto.py) — never plaintext on disk. For
@@ -88,6 +104,12 @@ class SystemEntry(BaseModel):
     db_hosts: list[ServerEntry] = Field(default_factory=list)  # was singular db_host: str pre-D-023
     ssh_auth_method: str = "password"  # "password" | "key" — default for ssh_credential below
     ssh_credential: ServerCredential = Field(default_factory=ServerCredential)  # D-023: default/fallback
+
+    # D-025 — optional: SAP WebGUI login, encrypted, entered via the
+    # Systems page. Empty by default; RegistryCredentialProvider (below)
+    # falls back to SAP_<SID>_USER/PASSWORD env vars (D-018's original
+    # mechanism) when this isn't set, so nothing breaks for existing setups.
+    sap_credential: SapCredential = Field(default_factory=SapCredential)
 
 
 def _migrate_system_dict(d: dict) -> None:
@@ -152,18 +174,47 @@ class EnvCredentialProvider(CredentialProvider):
         if not user or not password:
             raise RuntimeError(
                 f"Set SAP_{sid}_USER and SAP_{sid}_PASSWORD environment "
-                f"variables (interim credential handling pending OQ-8)")
+                f"variables, or enter SAP credentials for this system on "
+                f"the Systems page (D-025).")
         return {"user": user, "password": password}
 
 
+class RegistryCredentialProvider(CredentialProvider):
+    """D-025: prefers the registry-stored, encrypted SAP credential (set via
+    the Systems page) over env vars; falls back to EnvCredentialProvider's
+    env-var lookup for any system that hasn't had a credential entered
+    through the UI yet, so existing env-var-based setups keep working
+    unchanged. Takes an already-loaded Registry rather than a path, since
+    every call site already has one loaded for other reasons (looking up
+    the SystemEntry itself)."""
+
+    def __init__(self, registry: "Registry"):
+        self._registry = registry
+        self._env_fallback = EnvCredentialProvider()
+
+    def get(self, sid: str) -> dict[str, str]:
+        try:
+            entry = self._registry.get(sid)
+        except KeyError:
+            entry = None
+        if entry is not None and entry.sap_credential.is_set():
+            from . import crypto
+            return {"user": entry.sap_credential.username,
+                    "password": crypto.decrypt(entry.sap_credential.password_enc)}
+        return self._env_fallback.get(sid)
+
+
 def credential_status(entry: SystemEntry) -> dict:
-    """D-023: presence-only status for the Systems page's badges. SAP
-    WebGUI login is still env-var-only (D-018 unchanged for that piece) —
-    checked against env vars. SSH credentials are now registry-stored
-    (D-023) — checked against the entry's own encrypted fields, never
-    decrypted here; `ServerCredential.is_set()` only looks at whether
+    """D-023/D-025: presence-only status for the Systems page's badges.
+    SAP WebGUI login is "set" if EITHER the registry-stored credential
+    (D-025) or the legacy env vars (D-018) are present — either path works
+    at run time via RegistryCredentialProvider. SSH credentials are
+    registry-stored (D-023) — checked against the entry's own encrypted
+    fields, never decrypted here; `is_set()` only looks at whether
     password_enc/key_path is non-empty, not what it contains."""
-    sap_ok = bool(os.environ.get(f"SAP_{entry.sid}_USER")) and bool(os.environ.get(f"SAP_{entry.sid}_PASSWORD"))
+    sap_ok = (entry.sap_credential.is_set()
+              or (bool(os.environ.get(f"SAP_{entry.sid}_USER"))
+                  and bool(os.environ.get(f"SAP_{entry.sid}_PASSWORD"))))
     hosts = entry.servers + entry.db_hosts
     host_status = [
         {"hostname": h.hostname, "credential_set": h.effective_credential(entry.ssh_credential).is_set()}

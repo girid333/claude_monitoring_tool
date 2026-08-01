@@ -31,7 +31,7 @@ from playwright.async_api import Playwright, async_playwright
 from .login.base import SystemTarget
 from .login.basic import BasicLoginPlugin
 from .recorder.recorder import Recorder, save_flow
-from .registry import EnvCredentialProvider, Registry
+from .registry import Registry, RegistryCredentialProvider
 
 
 @dataclass
@@ -52,8 +52,8 @@ _sessions: dict[str, RecordingSession] = {}
 
 async def start_recording(sid: str, registry_path: str | Path = "systems.json") -> RecordingSession:
     reg = Registry.load(registry_path)
-    sys_entry = reg.get(sid)              # raises KeyError if unknown sid
-    creds = EnvCredentialProvider()       # raises RuntimeError if env vars unset
+    sys_entry = reg.get(sid)                    # raises KeyError if unknown sid
+    creds = RegistryCredentialProvider(reg)     # D-025: registry sap_credential, env vars fallback
 
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(headless=False)

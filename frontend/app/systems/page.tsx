@@ -1,17 +1,22 @@
 "use client";
 
-/* Systems — CRUD over the registry (D-021, extended D-023). Replaces
+/* Systems — CRUD over the registry (D-021, extended D-023/D-025). Replaces
    hand-editing systems.json, per Giri's request. Mirrors v1's proven
    table+modal UX (sap_monitoring/frontend/src/app/page.tsx "System
-   Inventory" view).
+   Inventory" view) — including v1's "SAP Credentials" fields (SAP
+   Username/Password), which the D-021 port initially dropped and Giri
+   asked to have back after re-checking against v1's actual form.
 
    D-023: SSH credentials (for app/dialog servers + DB hosts, used for the
-   `df -h` filesystem checks Core BASIS runs) are now entered and stored
-   HERE, encrypted at rest on the backend (engine/crypto.py) — this
-   supersedes D-018 for SSH creds specifically, per Giri's explicit
-   request. SAP WebGUI login credentials are UNCHANGED: still env-var-only
-   (D-018), shown as a configured/missing badge + export-command hint, no
-   password field for those.
+   `df -h` filesystem checks Core BASIS runs) are entered and stored HERE,
+   encrypted at rest on the backend (engine/crypto.py) — supersedes D-018
+   for SSH creds.
+
+   D-025: SAP WebGUI login credentials work the same way now — entered
+   here, encrypted at rest, supersedes D-018 for SAP login too. Leaving
+   both empty still falls back to SAP_<SID>_USER/PASSWORD env vars
+   (RegistryCredentialProvider, backend), so nothing breaks for anyone who
+   already has those set.
 
    Each app/dialog server and DB host can optionally override the system's
    default SSH credential (`ssh_credential`) — matches v1's own
@@ -38,6 +43,11 @@ const EMPTY_CRED: CredentialForm = {
   auth_method: "password", username: "", password: "", key_path: "", password_set: false,
 };
 
+// D-025: SAP login is always username+password — no auth_method/key_path,
+// unlike SSH's CredentialForm.
+type SapCredForm = { username: string; password: string; password_set: boolean };
+const EMPTY_SAP_CRED: SapCredForm = { username: "", password: "", password_set: false };
+
 type HostForm = {
   hostname: string;
   override: boolean;         // false = inherit the system's default ssh_credential
@@ -51,15 +61,18 @@ type SystemForm = {
   servers: HostForm[];
   db_hosts: HostForm[];
   ssh_credential: CredentialForm;
+  sap_credential: SapCredForm;
 };
 
 type CredentialOut = { auth_method: string; username: string; key_path: string; password_set: boolean } | null;
+type SapCredentialOut = { username: string; password_set: boolean };
 type HostOut = { hostname: string; credential: CredentialOut };
 type SystemRow = {
   sid: string; webgui_url: string; client: string; release_tag: string;
   auth: string; tags: string[]; rfc_enrichment: boolean;
   hostname: string; instance_number: string; url_checks: string[];
   servers: HostOut[]; db_hosts: HostOut[]; ssh_credential: CredentialOut;
+  sap_credential: SapCredentialOut;
   last_run: unknown;
   credentials: { sap_credentials: boolean; ssh_default_credential: boolean;
                  ssh_hosts: { hostname: string; credential_set: boolean }[] };
@@ -69,12 +82,17 @@ const EMPTY: SystemForm = {
   sid: "", webgui_url: "", client: "", release_tag: "UNKNOWN", auth: "basic",
   tags: [], rfc_enrichment: false, hostname: "", instance_number: "00",
   url_checks: [], servers: [], db_hosts: [], ssh_credential: { ...EMPTY_CRED },
+  sap_credential: { ...EMPTY_SAP_CRED },
 };
 
 function outToForm(c: CredentialOut): CredentialForm {
   return c
     ? { auth_method: c.auth_method, username: c.username, password: "", key_path: c.key_path, password_set: c.password_set }
     : { ...EMPTY_CRED };
+}
+
+function sapOutToForm(c: SapCredentialOut): SapCredForm {
+  return { username: c.username, password: "", password_set: c.password_set };
 }
 
 function hostOutToForm(h: HostOut): HostForm {
@@ -89,6 +107,7 @@ function rowToForm(s: SystemRow): SystemForm {
     servers: s.servers.map(hostOutToForm),
     db_hosts: s.db_hosts.map(hostOutToForm),
     ssh_credential: outToForm(s.ssh_credential),
+    sap_credential: sapOutToForm(s.sap_credential),
   };
 }
 
@@ -106,6 +125,7 @@ function formToBody(f: SystemForm) {
     hostname: f.hostname, instance_number: f.instance_number, url_checks: f.url_checks,
     servers: f.servers.map(host), db_hosts: f.db_hosts.map(host),
     ssh_auth_method: f.ssh_credential.auth_method, ssh_credential: cred(f.ssh_credential),
+    sap_credential: { username: f.sap_credential.username, password: f.sap_credential.password },
   };
 }
 
@@ -254,9 +274,9 @@ export default function Systems() {
       <h1 className="ltitle">Systems</h1>
       <p className="lsub">
         <b>{systems.length} systems</b> in the registry (D-006/D-021). SAP
-        WebGUI login credentials are never stored here (D-018) — set them as
-        environment variables. SSH credentials for app/dialog servers and DB
-        hosts ARE stored here, encrypted (D-023).
+        login and SSH credentials for app/dialog servers and DB hosts can be
+        entered here, encrypted at rest (D-023/D-025) — or left blank to
+        fall back to environment variables on the backend host.
       </p>
 
       <div style={{ marginBottom: 16 }}>
@@ -330,6 +350,23 @@ export default function Systems() {
               <input className="input" style={{ width: "100%" }} value={form.webgui_url}
                      onChange={e => setForm({ ...form, webgui_url: e.target.value })}
                      placeholder="https://host:port/sap/bc/gui/sap/its/webgui/" />
+            </div>
+
+            <h3 style={{ fontSize: 12.5, color: "var(--text-2)", margin: "16px 0 10px", borderTop: "1px solid var(--hairline)", paddingTop: 14 }}>
+              SAP Credentials (D-025 — encrypted at rest; leave blank to use SAP_&lt;SID&gt;_USER/PASSWORD env vars instead)
+            </h3>
+            <div className="field-row">
+              <div className="field-group">
+                <label className="field-label">SAP username</label>
+                <input className="input" style={{ width: "100%" }} value={form.sap_credential.username}
+                       onChange={e => setForm({ ...form, sap_credential: { ...form.sap_credential, username: e.target.value } })} />
+              </div>
+              <div className="field-group">
+                <label className="field-label">SAP password</label>
+                <input className="input" style={{ width: "100%" }} type="password" value={form.sap_credential.password}
+                       onChange={e => setForm({ ...form, sap_credential: { ...form.sap_credential, password: e.target.value } })}
+                       placeholder={form.sap_credential.password_set ? "•••••••• (leave blank to keep)" : "not set — falls back to env var"} />
+              </div>
             </div>
 
             <div className="field-row">
@@ -419,9 +456,9 @@ export default function Systems() {
                       setHosts={h => setForm({ ...form, db_hosts: h })} />
 
             <div style={{ fontSize: 11, color: "var(--text-3)", margin: "10px 0 16px" }}>
-              SAP WebGUI login isn&apos;t set here — after saving, export
-              SAP_{form.sid || "<SID>"}_USER / _PASSWORD on the machine
-              running the backend.
+              If SAP username/password above are left blank, the backend
+              falls back to SAP_{form.sid || "<SID>"}_USER / _PASSWORD
+              environment variables on the machine running it (D-025).
             </div>
 
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>

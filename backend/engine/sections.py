@@ -98,12 +98,12 @@ class CoreBasisSection(Section):
         result = SectionResult(self.section_id, self.title, ok=True)
 
         from .core_basis_wrap import ResilientRfcClient, build_v1_config, load_v1_orchestrator
-        from .registry import EnvCredentialProvider, Registry
+        from .registry import Registry, RegistryCredentialProvider
 
         try:
             reg = Registry.load(self.registry_path)
             sys_entry = reg.get(sid)
-            creds = EnvCredentialProvider().get(sid)
+            creds = RegistryCredentialProvider(reg).get(sid)  # D-025
         except Exception as exc:
             result.ok = False
             result.notes.append(f"Core BASIS skipped: {exc}")

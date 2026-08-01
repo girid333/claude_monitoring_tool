@@ -26,7 +26,7 @@ async def main() -> int:
     from .login.basic import BasicLoginPlugin
     from .probe import probe
     from .recovery import dismiss_known_popups, with_recovery
-    from .registry import EnvCredentialProvider, Registry
+    from .registry import Registry, RegistryCredentialProvider
     from .schema import Flow
     from .store import RunStore
 
@@ -41,7 +41,7 @@ async def main() -> int:
         page = await browser.new_page()
         login = BasicLoginPlugin(
             SystemTarget(system.sid, system.webgui_url, system.client),
-            EnvCredentialProvider())
+            RegistryCredentialProvider(reg))  # D-025
         await login.login(page)
         pr = await probe(page)
         print(f"[probe] mode={pr.mode} info={pr.session_info} notes={pr.notes}")

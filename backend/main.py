@@ -44,6 +44,8 @@ from engine import crypto
 from engine.registry import (
     EnvCredentialProvider,
     Registry,
+    RegistryCredentialProvider,
+    SapCredential,
     ServerCredential,
     ServerEntry,
     SystemEntry,
@@ -108,10 +110,21 @@ class ServerEntryIn(BaseModel):
     credential: ServerCredentialIn | None = None
 
 
+class SapCredentialIn(BaseModel):
+    """D-025: request-side shape for the SAP WebGUI login credential.
+    Same blank-password-means-keep-existing convention as
+    ServerCredentialIn. No auth_method/key_path — SAP logon is always
+    username+password."""
+
+    username: str = ""
+    password: str = ""
+
+
 class SystemIn(BaseModel):
-    """D-021/D-023: request body for POST/PUT /api/systems. Same fields as
-    SystemEntry except credentials arrive as plaintext-in (ServerCredentialIn)
-    rather than the encrypted-at-rest shape the registry actually stores."""
+    """D-021/D-023/D-025: request body for POST/PUT /api/systems. Same
+    fields as SystemEntry except credentials arrive as plaintext-in
+    (ServerCredentialIn/SapCredentialIn) rather than the encrypted-at-rest
+    shape the registry actually stores."""
 
     sid: str
     webgui_url: str
@@ -127,6 +140,7 @@ class SystemIn(BaseModel):
     db_hosts: list[ServerEntryIn] = []
     ssh_auth_method: str = "password"
     ssh_credential: ServerCredentialIn = ServerCredentialIn()
+    sap_credential: SapCredentialIn = SapCredentialIn()
 
 
 def _in_to_credential(cred_in: ServerCredentialIn | None,
@@ -151,8 +165,16 @@ def _existing_host_credential(existing: SystemEntry | None, pool: str, hostname:
     return None
 
 
+def _in_to_sap_credential(cred_in: SapCredentialIn, existing: SapCredential | None) -> SapCredential:
+    """D-025: same blank-password-means-keep-existing rule as
+    _in_to_credential(), specialized for the no-auth_method SAP shape."""
+    password_enc = (crypto.encrypt(cred_in.password) if cred_in.password
+                     else (existing.password_enc if existing else ""))
+    return SapCredential(username=cred_in.username, password_enc=password_enc)
+
+
 def _to_stored(sys_in: SystemIn, existing: SystemEntry | None) -> SystemEntry:
-    """D-021/D-023: SystemIn (plaintext credentials) -> SystemEntry
+    """D-021/D-023/D-025: SystemIn (plaintext credentials) -> SystemEntry
     (encrypted, the only shape Registry.save() ever writes)."""
 
     def build_pool(entries_in: list[ServerEntryIn], pool: str) -> list[ServerEntry]:
@@ -165,6 +187,8 @@ def _to_stored(sys_in: SystemIn, existing: SystemEntry | None) -> SystemEntry:
 
     ssh_credential = _in_to_credential(
         sys_in.ssh_credential, existing.ssh_credential if existing else None) or ServerCredential()
+    sap_credential = _in_to_sap_credential(
+        sys_in.sap_credential, existing.sap_credential if existing else None)
 
     return SystemEntry(
         sid=sys_in.sid, webgui_url=sys_in.webgui_url, client=sys_in.client,
@@ -174,6 +198,7 @@ def _to_stored(sys_in: SystemIn, existing: SystemEntry | None) -> SystemEntry:
         servers=build_pool(sys_in.servers, "servers"),
         db_hosts=build_pool(sys_in.db_hosts, "db_hosts"),
         ssh_auth_method=sys_in.ssh_auth_method, ssh_credential=ssh_credential,
+        sap_credential=sap_credential,
     )
 
 
@@ -185,8 +210,14 @@ def _cred_out(cred: ServerCredential | None) -> dict | None:
             "key_path": cred.key_path, "password_set": bool(cred.password_enc)}
 
 
+def _sap_cred_out(cred: SapCredential) -> dict:
+    """D-025: same redaction rule as _cred_out(), no-auth_method shape."""
+    return {"username": cred.username, "password_set": bool(cred.password_enc)}
+
+
 def _system_out(s: SystemEntry) -> dict:
-    d = s.model_dump(exclude={"servers", "db_hosts", "ssh_credential"})
+    d = s.model_dump(exclude={"servers", "db_hosts", "ssh_credential", "sap_credential"})
+    d["sap_credential"] = _sap_cred_out(s.sap_credential)
     d["servers"] = [{"hostname": e.hostname, "credential": _cred_out(e.credential)} for e in s.servers]
     d["db_hosts"] = [{"hostname": e.hostname, "credential": _cred_out(e.credential)} for e in s.db_hosts]
     d["ssh_credential"] = _cred_out(s.ssh_credential)
@@ -416,7 +447,7 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
     from engine.sections import CoreBasisSection, SectionResult, build_report
 
     reg = Registry.load(SYSTEMS_PATH)
-    creds = EnvCredentialProvider()
+    creds = RegistryCredentialProvider(reg)  # D-025: registry sap_credential first, env vars fallback
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
