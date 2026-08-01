@@ -17,10 +17,17 @@ services:
     volumes:
       - backend_data:/data
     environment:
-      - CORS_ORIGINS=http://localhost:3000
-      # SAP_<SID>_USER / SAP_<SID>_PASSWORD / SAP_<SID>_SSH_* (D-018):
-      # define these in a .env file (docker compose loads it automatically)
-      # rather than listing them individually here.
+      # D-024: "*" — this is a single-user, cookie-free API (no
+      # allow_credentials in main.py's CORSMiddleware, so a wildcard origin
+      # is safe here) reached from whatever host/IP/hostname the browser
+      # happens to use; a fixed "http://localhost:3000" broke the moment
+      # the app was reached via a LAN IP instead. Lock this down to
+      # specific origins in .env (CORS_ORIGINS=https://your-host) if this
+      # ever needs to be internet-facing or multi-tenant.
+      - CORS_ORIGINS=*
+      # SAP_<SID>_USER / SAP_<SID>_PASSWORD / REGISTRY_ENCRYPTION_KEY
+      # (D-018/D-023): define these in a .env file (docker compose loads it
+      # automatically) rather than listing them individually here.
     env_file:
       - path: ./.env
         required: false

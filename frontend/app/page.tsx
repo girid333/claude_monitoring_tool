@@ -6,8 +6,9 @@
    extend there first, then port here. */
 
 import { useEffect, useMemo, useState } from "react";
+import { apiBase } from "./lib/api";
 
-const API = process.env.NEXT_PUBLIC_API ?? "http://localhost:8000";
+const API = apiBase();
 
 type SystemRow = {
   sid: string; release_tag: string; auth: string; tags: string[];

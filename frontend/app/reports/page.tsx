@@ -5,8 +5,9 @@
    links to the /api/reports/{run_id}/{sid}/download/{kind} route. */
 
 import { useEffect, useState } from "react";
+import { apiBase } from "../lib/api";
 
-const API = process.env.NEXT_PUBLIC_API ?? "http://localhost:8000";
+const API = apiBase();
 
 type ReportRow = {
   run_id: string; sid: string; docx_path: string | null;

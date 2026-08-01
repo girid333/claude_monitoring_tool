@@ -5,8 +5,9 @@
    different schemas, same UI). */
 
 import { useEffect, useState } from "react";
+import { apiBase } from "../lib/api";
 
-const API = process.env.NEXT_PUBLIC_API ?? "http://localhost:8000";
+const API = apiBase();
 
 type FlowRun = {
   run_id: string; sid: string; flow_id: string; mode: string; ok: boolean;

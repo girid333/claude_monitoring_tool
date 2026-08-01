@@ -22,8 +22,9 @@
    a password field blank on an edit means "keep what's already stored". */
 
 import { useEffect, useState } from "react";
+import { apiBase } from "../lib/api";
 
-const API = process.env.NEXT_PUBLIC_API ?? "http://localhost:8000";
+const API = apiBase();
 
 type CredentialForm = {
   auth_method: string;   // "password" | "key"
@@ -194,7 +195,13 @@ export default function Systems() {
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<{ sap: string } | null>(null);
 
-  const load = () => fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems).catch(() => {});
+  // D-024: fetch() throws on a network-level failure (connection refused,
+  // DNS, CORS block) — a bare .catch(() => {}) here used to swallow that
+  // completely silently. Now surfaces a real message instead of just
+  // showing an empty/stale list with no explanation.
+  const load = () =>
+    fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems)
+      .catch(err => setError(`Could not reach the backend at ${API}: ${err.message}`));
   useEffect(() => { load(); }, []);
 
   const openAdd = () => { setEditingSid(null); setForm(EMPTY); setError(null); setModalOpen(true); };
@@ -209,10 +216,19 @@ export default function Systems() {
     setError(null);
     const method = editingSid ? "PUT" : "POST";
     const url = editingSid ? `${API}/api/systems/${editingSid}` : `${API}/api/systems`;
-    const res = await fetch(url, {
-      method, headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(formToBody(form)),
-    });
+    // D-024: previously unguarded — a thrown fetch (network failure) meant
+    // clicking "Add system" did nothing visible at all. Now always leaves
+    // the user with either a saved system or a visible reason it failed.
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method, headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(formToBody(form)),
+      });
+    } catch (err) {
+      setError(`Could not reach the backend at ${API}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       setError(body.detail ?? `save failed (${res.status})`);

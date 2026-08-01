@@ -7,8 +7,9 @@
    real constraint of interactive recording, not a bug in this UI. */
 
 import { useEffect, useRef, useState } from "react";
+import { apiBase } from "../lib/api";
 
-const API = process.env.NEXT_PUBLIC_API ?? "http://localhost:8000";
+const API = apiBase();
 
 type SystemRow = { sid: string; release_tag: string; auth: string };
 type RecorderStatus = {
