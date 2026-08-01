@@ -31,6 +31,8 @@ export default function Landscape() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [runId, setRunId] = useState<string | null>(null);
   const [islandEvents, setIslandEvents] = useState<IslandEvent[]>([]);
+  const [includeCoreBasis, setIncludeCoreBasis] = useState(true);
+  const [includeFlows, setIncludeFlows] = useState(true);
 
   useEffect(() => {
     fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems).catch(() => {});
@@ -52,7 +54,8 @@ export default function Landscape() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sids: [...selected],
-        flows: ["flows/sm37_cancelled_jobs.json"],
+        flows: includeFlows ? ["flows/sm37_cancelled_jobs.json"] : [],
+        include_core_basis: includeCoreBasis,   // D-026: was hardcoded false
       }),
     });
     setIslandEvents([]);
@@ -60,7 +63,8 @@ export default function Landscape() {
   };
 
   const islandChips = useMemo(
-    () => islandEvents.filter(e => e.type === "flow_done" || e.type === "flow_start"),
+    () => islandEvents.filter(e =>
+      ["flow_done", "flow_start", "core_basis_start", "core_basis_done"].includes(e.type)),
     [islandEvents]);
 
   return (
@@ -81,17 +85,20 @@ export default function Landscape() {
               <div style={{ fontSize: 11, color: "var(--text-3)" }}>Run {runId}</div>
             </div>
             <div style={{ display: "flex", gap: 6, flex: 1, justifyContent: "flex-end", flexWrap: "wrap" }}>
-              {islandChips.map((e, i) => (
-                <span key={i} style={{
-                  fontSize: 10.5, fontWeight: 600, padding: "3.5px 9px",
-                  borderRadius: 999, border: "1px solid var(--hairline)",
-                  color: e.type === "flow_start" ? "var(--blue)"
-                    : e.ok ? "var(--green)" : "var(--orange)",
-                }}>
-                  {e.flow_id?.split("_")[0]?.toUpperCase()}
-                  {e.type === "flow_done" ? (e.ok ? " ✓" : " !") : " …"}
-                </span>
-              ))}
+              {islandChips.map((e, i) => {
+                const isStart = e.type === "flow_start" || e.type === "core_basis_start";
+                const label = e.type.startsWith("core_basis")
+                  ? `${e.sid} BASIS` : e.flow_id?.split("_")[0]?.toUpperCase();
+                return (
+                  <span key={i} style={{
+                    fontSize: 10.5, fontWeight: 600, padding: "3.5px 9px",
+                    borderRadius: 999, border: "1px solid var(--hairline)",
+                    color: isStart ? "var(--blue)" : e.ok ? "var(--green)" : "var(--orange)",
+                  }}>
+                    {label}{isStart ? " …" : (e.ok ? " ✓" : " !")}
+                  </span>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -101,10 +108,23 @@ export default function Landscape() {
       <p style={{ fontSize: 13.5, color: "var(--text-2)", margin: "4px 0 26px" }}>
         <b style={{ color: "var(--text)" }}>{systems.length} systems</b>
         {selected.size > 0 && <> · {selected.size} selected
-          <button onClick={startRun} disabled={!!runId} style={{
+          <label style={{ marginLeft: 14, fontSize: 12, color: "var(--text-2)", cursor: "pointer" }}>
+            <input type="checkbox" checked={includeCoreBasis}
+                   onChange={e => setIncludeCoreBasis(e.target.checked)}
+                   style={{ marginRight: 5, verticalAlign: -1 }} />
+            Core BASIS
+          </label>
+          <label style={{ marginLeft: 10, fontSize: 12, color: "var(--text-2)", cursor: "pointer" }}>
+            <input type="checkbox" checked={includeFlows}
+                   onChange={e => setIncludeFlows(e.target.checked)}
+                   style={{ marginRight: 5, verticalAlign: -1 }} />
+            Functional flows
+          </label>
+          <button onClick={startRun} disabled={!!runId || (!includeCoreBasis && !includeFlows)} style={{
             marginLeft: 12, background: "var(--blue)", color: "#fff", border: 0,
             borderRadius: 999, padding: "5px 14px", fontSize: 12.5,
-            fontWeight: 600, cursor: "pointer", opacity: runId ? 0.5 : 1,
+            fontWeight: 600, cursor: "pointer",
+            opacity: (runId || (!includeCoreBasis && !includeFlows)) ? 0.5 : 1,
           }}>Run sweep</button></>}
       </p>
 
