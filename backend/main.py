@@ -241,6 +241,7 @@ class RunRequest(BaseModel):
 
 class RecorderStartRequest(BaseModel):
     sid: str
+    tcode: str = ""     # D-034: open this transaction first, record it as step 1
 
 
 class RecorderStopRequest(BaseModel):
@@ -489,7 +490,8 @@ def download_report(run_id: str, sid: str, kind: str) -> FileResponse:
 async def recorder_start(req: RecorderStartRequest) -> dict:
     from engine.recorder_service import start_recording
     try:
-        session = await start_recording(req.sid, registry_path=SYSTEMS_PATH)  # D-028
+        session = await start_recording(req.sid, registry_path=SYSTEMS_PATH,  # D-028
+                                         tcode=req.tcode.strip())             # D-034
     except KeyError:
         raise HTTPException(404, f"unknown sid {req.sid!r} in systems.json")
     except Exception as exc:  # noqa: BLE001
@@ -545,6 +547,64 @@ def recorder_status(recording_id: str) -> dict:
 def recorder_active() -> list[dict]:
     from engine.recorder_service import list_active
     return list_active()
+
+
+class RecorderCaptureRequest(BaseModel):
+    recording_id: str
+    note: str = ""
+
+
+@app.post("/api/recorder/capture")
+def recorder_capture(req: RecorderCaptureRequest) -> dict:
+    """D-034: insert a screenshot-evidence step at this point in the recording."""
+    from engine.recorder_service import add_capture_step
+    try:
+        return add_capture_step(req.recording_id, req.note)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+
+
+# ── Recorded flow library (D-034) ────────────────────────────────────────
+
+FLOWS_DIR = os.environ.get("FLOWS_DIR", "flows")
+
+
+@app.get("/api/flows")
+def list_flows() -> list[dict]:
+    """Saved recordings, for the 'which flow do I run?' picker on Landscape."""
+    out = []
+    d = Path(FLOWS_DIR)
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob("*.json")):
+        try:
+            data = json.loads(p.read_text())
+        except Exception:  # noqa: BLE001,PERF203 - skip unreadable/corrupt files
+            continue
+        steps = data.get("steps", [])
+        out.append({
+            "flow_id": data.get("flow_id", p.stem),
+            "description": data.get("description", ""),
+            "path": str(p),
+            "step_count": len(steps),
+            "tcodes": [s.get("value") for s in steps
+                       if s.get("act") == "start_tcode" and s.get("value")],
+            "has_capture": any(s.get("act") == "capture" for s in steps),
+            "applies_to": data.get("applies_to", []),
+        })
+    return out
+
+
+@app.delete("/api/flows/{flow_id}")
+def delete_flow(flow_id: str) -> dict:
+    # Guard against path traversal — flow_id comes straight off the URL.
+    if "/" in flow_id or "\\" in flow_id or flow_id.startswith("."):
+        raise HTTPException(400, "invalid flow_id")
+    p = Path(FLOWS_DIR) / f"{flow_id}.json"
+    if not p.exists():
+        raise HTTPException(404, "flow not found")
+    p.unlink()
+    return {"deleted": True, "flow_id": flow_id}
 
 
 @app.post("/api/recorder/stop")
@@ -616,10 +676,21 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                 await emit(run_id, {"type": "probe", "sid": sid,
                                     "mode": pr.mode, "info": pr.session_info})
                 engine = ReplayEngine(page, pr.mode, run_id, sid,
-                                      Path("run_artifacts") / run_id)
+                                      Path("run_artifacts") / run_id,
+                                      webgui_url=sys_entry.webgui_url,   # D-034
+                                      client=sys_entry.client)
                 flow_results = []
                 for flow_path in req.flows:
-                    flow = Flow(**json.loads(Path(flow_path).read_text()))
+                    # D-034: accept either a path ("flows/x.json") or a bare
+                    # flow_id ("x") — the UI's picker sends flow_ids.
+                    p = Path(flow_path)
+                    if not p.exists():
+                        p = Path(FLOWS_DIR) / f"{Path(flow_path).stem}.json"
+                    if not p.exists():
+                        await emit(run_id, {"type": "system_error", "sid": sid,
+                                            "error": f"flow not found: {flow_path}"})
+                        continue
+                    flow = Flow(**json.loads(p.read_text()))
                     await emit(run_id, {"type": "flow_start", "sid": sid,
                                         "flow_id": flow.flow_id})
                     await dismiss_known_popups(page)

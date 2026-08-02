@@ -25,6 +25,7 @@ export default function RecorderPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [flowId, setFlowId] = useState("");
+  const [tcode, setTcode] = useState("");          // D-034: start transaction
   const [saved, setSaved] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -70,13 +71,14 @@ export default function RecorderPage() {
     try {
       const res = await fetch(`${API}/api/recorder/start`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sid }),
+        body: JSON.stringify({ sid, tcode: tcode.trim().toUpperCase() }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       const j = await res.json();
       setRecId(j.recording_id);
       if (j.viewport) setViewport(j.viewport);
-      setFlowId(prev => prev || `${sid.toLowerCase()}_flow`);
+      setFlowId(prev => prev || (tcode
+        ? `${tcode.trim().toLowerCase()}_check` : `${sid.toLowerCase()}_flow`));
     } catch (err) {
       setError(`Could not start recording: ${err instanceof Error ? err.message : String(err)}`);
     } finally { setBusy(false); }
@@ -97,6 +99,19 @@ export default function RecorderPage() {
     } catch (err) {
       setError(`Could not stop recording: ${err instanceof Error ? err.message : String(err)}`);
     } finally { setBusy(false); }
+  };
+
+  const capture = async () => {
+    if (!recId) return;
+    try {
+      const res = await fetch(`${API}/api/recorder/capture`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recording_id: recId }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json();
+      if (j.steps) setSteps(j.steps);
+    } catch (err) { setError(`Could not add screenshot step: ${err}`); }
   };
 
   const cancel = async () => {
@@ -179,20 +194,33 @@ export default function RecorderPage() {
                 </option>
               ))}
             </select>
+            <label style={{ fontSize: 12.5, color: "var(--text-2)" }}>Start at T-code</label>
+            <input className="input" value={tcode}
+                   onChange={e => setTcode(e.target.value.toUpperCase())}
+                   placeholder="SM37" style={{ width: 120 }}
+                   title="The session jumps here before recording starts, and this becomes step 1 of the flow" />
             <button className="btn" disabled={!sid || busy} onClick={start}>
               {busy ? "Starting…" : "Start Recording"}
             </button>
+            <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+              Leave T-code blank to start from the SAP home screen.
+            </span>
           </>
         ) : (
           <>
             <span className="pulse" style={{ width: 9, height: 9, borderRadius: "50%",
                                               background: "var(--red)" }} />
             <span style={{ fontSize: 13, fontWeight: 600 }}>Recording {sid}</span>
-            <span style={{ fontSize: 12, color: "var(--text-3)" }}>{steps.length} steps captured</span>
-            <label style={{ fontSize: 12.5, color: "var(--text-2)", marginLeft: 10 }}>Flow name</label>
+            <span style={{ fontSize: 12, color: "var(--text-3)" }}>{steps.length} steps</span>
+            <button className="btn secondary" disabled={busy} onClick={capture}
+                    title="Insert a screenshot step here — it appears as evidence in the report">
+              📸 Capture screenshot
+            </button>
+            <label style={{ fontSize: 12.5, color: "var(--text-2)", marginLeft: 6 }}>Name</label>
             <input className="input" value={flowId} onChange={e => setFlowId(e.target.value)}
-                   placeholder="sm37_cancelled_jobs" style={{ width: 220 }} />
-            <button className="btn" disabled={busy} onClick={stop} style={{ marginLeft: "auto" }}>
+                   placeholder="sm37_cancelled_jobs" style={{ width: 200 }} />
+            <button className="btn" disabled={busy || !flowId.trim()} onClick={stop}
+                    style={{ marginLeft: "auto" }}>
               {busy ? "Saving…" : "Stop & Save Flow"}
             </button>
             <button className="btn secondary" disabled={busy} onClick={cancel}>Discard</button>

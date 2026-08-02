@@ -46,12 +46,15 @@ def render_params(value: Any, params: dict[str, Any]) -> Any:
 
 class ReplayEngine:
     def __init__(self, page: Page, mode: str, run_id: str, sid: str,
-                 artifact_dir: Path):
+                 artifact_dir: Path, webgui_url: str = "", client: str = ""):
         self.page = page
         self.mode = mode
         self.run_id = run_id
         self.sid = sid
         self.artifact_dir = artifact_dir
+        # D-034: needed for the ~transaction URL fallback in START_TCODE.
+        self.webgui_url = webgui_url
+        self.client = client
         self.resolver: Resolver = (
             ScriptingResolver(page) if mode == "scripting" else DomResolver(page)
         )
@@ -83,13 +86,17 @@ class ReplayEngine:
         value = render_params(step.value, params)
 
         if step.act == Act.START_TCODE:
-            # OK-code field first (v1-proven fast path), URL param fallback.
-            res = await self.resolver.resolve(_okcode_target())
-            await self.resolver.set_value(res, f"/n{value}")
-            await self.resolver.send_vkey(0)
+            # D-034: use v1's proven navigation (all frames, three selectors,
+            # ~transaction URL fallback). The previous single-selector,
+            # main-frame-only lookup failed on real systems.
+            from .tcode_nav import goto_tcode
+            method = await goto_tcode(self.page, str(value),
+                                       webgui_url=getattr(self, "webgui_url", ""),
+                                       client=getattr(self, "client", ""))
             await wait_ready(self.page, step.timeout_s, self.mode == "scripting")
             return StepResult(index=i, act=step.act, ok=True,
-                              resolver=self.resolver.name, detail=f"tcode {value}")
+                              resolver=self.resolver.name,
+                              detail=f"tcode {value} (via {method})")
 
         if step.act == Act.WAIT_READY:
             await wait_ready(self.page, step.timeout_s, self.mode == "scripting")

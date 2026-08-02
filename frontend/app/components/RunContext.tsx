@@ -36,7 +36,7 @@ const EMPTY: RunState = {
 };
 
 type Ctx = RunState & {
-  startRun: (sids: string[], opts: { coreBasis: boolean; flows: boolean }) => Promise<void>;
+  startRun: (sids: string[], opts: { coreBasis: boolean; flows: string[] }) => Promise<void>;
   dismiss: () => void;
   isRunning: boolean;
 };
@@ -163,14 +163,15 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
     return () => { esRef.current?.close(); };
   }, [attach]);
 
-  const startRun = useCallback(async (sids: string[], opts: { coreBasis: boolean; flows: boolean }) => {
+  const startRun = useCallback(async (sids: string[],
+                                       opts: { coreBasis: boolean; flows: string[] }) => {
     setState({ ...EMPTY, sids, phase: "Starting run…", startedAt: Date.now() });
     try {
       const res = await fetch(`${API}/api/run`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sids,
-          flows: opts.flows ? ["flows/sm37_cancelled_jobs.json"] : [],
+          flows: opts.flows,          // D-034: explicit flow_ids from the picker
           include_core_basis: opts.coreBasis,
         }),
       });

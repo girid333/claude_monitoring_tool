@@ -65,7 +65,11 @@ _sessions: dict[str, RecordingSession] = {}
 
 
 async def start_recording(sid: str,
-                           registry_path: str | Path = "systems.json") -> RecordingSession:
+                           registry_path: str | Path = "systems.json",
+                           tcode: str = "") -> RecordingSession:
+    """D-034: `tcode` (optional) navigates the session to that transaction
+    before capture begins AND records it as the flow's first step, so a
+    replay starts from the same screen the human did."""
     reg = Registry.load(registry_path)
     sys_entry = reg.get(sid)                    # raises KeyError if unknown sid
     creds = RegistryCredentialProvider(reg)     # D-025
@@ -86,6 +90,23 @@ async def start_recording(sid: str,
 
     recorder = Recorder(page)
     await recorder.start()
+
+    # D-034: jump to the requested T-code and make it step 1 of the flow.
+    if tcode:
+        from .tcode_nav import goto_tcode
+        try:
+            # Pause capture: goto_tcode drives the OK-code field itself, and
+            # those are the tool's actions, not the user's (D-034).
+            recorder.pause()
+            await goto_tcode(page, tcode, webgui_url=sys_entry.webgui_url,
+                              client=sys_entry.client)
+            await page.wait_for_timeout(300)   # let the roundtrip settle
+            recorder.resume()
+            recorder.add_start_tcode(tcode)
+            await recorder.refresh()   # new frames after navigation
+        except Exception as exc:  # noqa: BLE001
+            await _close(pw, browser, context)
+            raise RuntimeError(f"could not open T-code {tcode}: {exc}") from exc
 
     cdp = await context.new_cdp_session(page)
     recording_id = uuid.uuid4().hex[:12]
@@ -208,6 +229,14 @@ async def dispatch_input(recording_id: str, ev: dict) -> None:
         await s.cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **base})
     else:
         raise ValueError(f"unknown input kind: {kind!r}")
+
+
+def add_capture_step(recording_id: str, note: str = "") -> dict:
+    """D-034: user pressed 'Capture screenshot' — insert an evidence step at
+    this exact point in the recorded sequence."""
+    s = get_session(recording_id)
+    s.recorder.add_capture(note)
+    return {"steps": s.recorder.steps_preview()}
 
 
 async def screenshot(recording_id: str) -> str:

@@ -181,11 +181,28 @@ class Recorder:
         self.page = page
         self.events: list[dict] = []
         self._started = False
+        # D-034: while paused, DOM events are dropped. Needed because the
+        # tool itself drives the page during programmatic T-code navigation
+        # (goto_tcode writes to the OK-code field and presses Enter) — those
+        # are OUR actions, not the user's, and recording them produced a
+        # duplicate, brittle `set okcd=/nSM37` + `vkey 0` pair alongside the
+        # clean synthetic start_tcode step.
+        self.paused = False
+
+    def pause(self) -> None:
+        self.paused = True
+
+    def resume(self) -> None:
+        self.paused = False
+
+    def _on_event(self, ev: dict) -> None:
+        if not self.paused:
+            self.events.append(ev)
 
     async def start(self) -> None:
         if not self._started:
             await self.page.expose_binding(
-                "__rec_emit", lambda _src, ev: self.events.append(ev))
+                "__rec_emit", lambda _src, ev: self._on_event(ev))
             # Re-inject on every navigation (WebGUI re-renders constantly)
             await self.page.add_init_script(_INJECT_JS)
             self._started = True
@@ -210,13 +227,32 @@ class Recorder:
                 label = (t.dom.label or t.dom.text
                          or (list(t.dom.attr.values())[0] if t.dom.attr else None)
                          or t.dom.pos_id)
+            if s.act == Act.START_TCODE:
+                label = f"T-code {s.value}"
+            elif s.act == Act.CAPTURE:
+                label = "screenshot"
             out.append({
                 "act": s.act.value,
                 "target": label or (t.sid if t else None) or "—",
                 "value": s.value if not isinstance(s.value, dict) else None,
-                "resolved_by": "scripting" if (t and t.sid) else ("dom" if t else "n/a"),
+                "resolved_by": ("scripting" if (t and t.sid)
+                                 else "dom" if t
+                                 else "manual" if s.act in (Act.START_TCODE, Act.CAPTURE)
+                                 else "n/a"),
             })
         return out
+
+    # ── D-034: manually injected steps ──────────────────────────────────
+    # Recorded flows need two things the DOM can't tell us: where the flow
+    # STARTS (the T-code) and where the user wants EVIDENCE captured. Both
+    # are pushed into the same event list so ordering with real interactions
+    # is preserved naturally.
+
+    def add_start_tcode(self, tcode: str) -> None:
+        self.events.append({"kind": "start_tcode", "value": tcode})
+
+    def add_capture(self, note: str = "") -> None:
+        self.events.append({"kind": "capture", "value": note})
 
     async def stop(self, flow_id: str, description: str = "") -> Flow:
         steps = self._coalesce(self.events)
@@ -233,7 +269,15 @@ class Recorder:
                                  dom=DomCandidates(**dom_raw) if dom_raw else None)
 
             kind = ev.get("kind")
-            if kind == "set":
+            if kind == "start_tcode":
+                steps.append(Step(act=Act.START_TCODE, value=ev.get("value")))
+                steps.append(Step(act=Act.WAIT_READY))
+
+            elif kind == "capture":
+                # D-034: screenshot evidence at a point the user chose.
+                steps.append(Step(act=Act.CAPTURE, mode=["screenshot"]))
+
+            elif kind == "set":
                 # Collapse repeated edits of the same field into one step
                 if (steps and steps[-1].act == Act.SET and steps[-1].target and target
                         and _same_target(steps[-1].target, target)):

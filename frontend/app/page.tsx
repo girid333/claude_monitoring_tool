@@ -13,6 +13,10 @@ import { useRun } from "./components/RunContext";
 
 const API = apiBase();
 
+type FlowInfo = {
+  flow_id: string; description: string; step_count: number;
+  tcodes: string[]; has_capture: boolean;
+};
 type SystemRow = {
   sid: string; system_name?: string; release_tag: string; auth: string; tags: string[];
   last_run: { ok: boolean; flow_id: string; checks: { ok: boolean; severity: string }[] } | null;
@@ -33,17 +37,20 @@ export default function Landscape() {
   const [systems, setSystems] = useState<SystemRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [coreBasis, setCoreBasis] = useState(true);
-  const [flows, setFlows] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // D-034: pick WHICH recorded flows to replay
+  const [flowLib, setFlowLib] = useState<FlowInfo[]>([]);
+  const [pickedFlows, setPickedFlows] = useState<Set<string>>(new Set());
 
   const run = useRun();
 
   useEffect(() => {
     fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems)
       .catch(err => setLoadError(`Could not reach the backend at ${API}: ${err instanceof Error ? err.message : String(err)}`));
+    fetch(`${API}/api/flows`).then(r => r.json()).then(setFlowLib).catch(() => {});
   }, [run.done]);
 
-  const canRun = selected.size > 0 && (coreBasis || flows) && !run.isRunning;
+  const canRun = selected.size > 0 && (coreBasis || pickedFlows.size > 0) && !run.isRunning;
 
   const doneCount = run.tcodes.filter(t => ["done", "warn"].includes(run.tcodeStatus[t])).length;
   const pct = run.tcodes.length ? Math.round((doneCount / run.tcodes.length) * 100) : 0;
@@ -74,16 +81,53 @@ export default function Landscape() {
                  style={{ marginRight: 6, verticalAlign: -1 }} />
           Core BASIS sweep <span style={{ color: "var(--text-3)" }}>(23 T-codes + SSH + URL checks → Word/PDF report)</span>
         </label>
-        <label style={{ fontSize: 12.5, color: "var(--text-2)", cursor: "pointer" }}>
-          <input type="checkbox" checked={flows} onChange={e => setFlows(e.target.checked)}
-                 style={{ marginRight: 6, verticalAlign: -1 }} />
-          Functional flows
-        </label>
         <button className="btn" disabled={!canRun}
-                onClick={() => run.startRun([...selected], { coreBasis, flows })}
+                onClick={() => run.startRun([...selected], { coreBasis, flows: [...pickedFlows] })}
                 style={{ marginLeft: "auto" }}>
           {run.isRunning ? "Running…" : "Execute"}
         </button>
+      </div>
+
+      {/* ── D-034: choose which recorded flows to replay ── */}
+      <div className="panel" style={{ padding: "14px 18px", marginBottom: 22, borderRadius: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Functional flows (recordings)</div>
+          <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+            {pickedFlows.size > 0 ? `${pickedFlows.size} selected` : "none selected"}
+          </div>
+          <a href="/recorder" style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--blue)" }}>
+            + Record a new flow
+          </a>
+        </div>
+        {flowLib.length === 0 ? (
+          <div className="rsub">
+            No recordings yet — use the <a href="/recorder" style={{ color: "var(--blue)" }}>Recorder</a> to
+            capture a transaction, then it appears here.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {flowLib.map(f => {
+              const on = pickedFlows.has(f.flow_id);
+              return (
+                <button key={f.flow_id} className="btn secondary"
+                        onClick={() => setPickedFlows(prev => {
+                          const n = new Set(prev);
+                          if (n.has(f.flow_id)) n.delete(f.flow_id); else n.add(f.flow_id);
+                          return n;
+                        })}
+                        title={`${f.step_count} steps${f.tcodes.length ? ` · ${f.tcodes.join(", ")}` : ""}${f.has_capture ? " · has screenshots" : ""}`}
+                        style={{ borderRadius: 999, fontSize: 12.5,
+                                  outline: on ? "2px solid var(--blue)" : "none",
+                                  color: on ? "var(--blue)" : undefined }}>
+                  {on ? "✓ " : ""}{f.flow_id}
+                  <span style={{ color: "var(--text-3)", marginLeft: 6 }}>
+                    {f.tcodes.length ? f.tcodes.join(",") : `${f.step_count} steps`}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* ── Live progress (survives navigation via RunContext) ── */}
