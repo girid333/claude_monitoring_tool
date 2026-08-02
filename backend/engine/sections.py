@@ -216,6 +216,44 @@ def flow_results_to_report_rows(results: list[FlowRunResult]) -> list[dict]:
     return rows
 
 
+def build_reports(section_results: list[SectionResult], output_dir: str = "reports",
+                   cover_image_path: str | None = None) -> list[dict]:
+    """D-035: one document PER KIND, instead of one combined file.
+
+    Core BASIS keeps v1's inherited four-section template. Recorded flows get
+    `flow_report.FlowReportGenerator` — named after the recording and
+    containing only sections that have content. Previously both shared the
+    BASIS template, so a flows-only run produced a file called "SAP
+    Monitoring Report v2.0" whose first three sections were empty pages.
+
+    Returns [{"kind","label","docx","pdf"}, ...].
+    """
+    out: list[dict] = []
+
+    v1_results = next((sr.v1_results for sr in section_results
+                        if sr.v1_results is not None), None)
+    if v1_results:
+        from report_composer import ReportGenerator
+        gen = ReportGenerator(v1_results, output_dir=output_dir,
+                               cover_image_path=cover_image_path,
+                               extra_sections=[])
+        out.append({"kind": "core_basis", "label": "Core BASIS",
+                    "docx": gen.generate_word(), "pdf": gen.generate_pdf()})
+
+    # One report per recorded flow, named by the flow (D-035).
+    from flow_report import FlowReportGenerator
+    rows_by_flow: dict[str, list[dict]] = {}
+    for sr in section_results:
+        for row in flow_results_to_report_rows(sr.flow_results):
+            rows_by_flow.setdefault(row["flow_id"], []).append(row)
+    for flow_id, rows in rows_by_flow.items():
+        fgen = FlowReportGenerator(flow_id, rows, output_dir=output_dir)
+        out.append({"kind": "flow", "label": flow_id,
+                    "docx": fgen.generate_word(), "pdf": fgen.generate_pdf()})
+
+    return out
+
+
 def build_report(section_results: list[SectionResult], output_dir: str = "reports",
                   cover_image_path: str | None = None) -> dict[str, str]:
     """D-014 (done): assemble the actual report_composer.ReportGenerator call

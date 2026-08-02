@@ -39,13 +39,18 @@ CREATE TABLE IF NOT EXISTS core_basis_runs (
 CREATE INDEX IF NOT EXISTS idx_core_basis_sid ON core_basis_runs (sid, started_at DESC);
 
 -- D-014: generated Word/PDF report artifacts per run, for the Reports UI.
+-- D-035: `label` in the primary key — a run now produces SEPARATE documents
+-- (one Core BASIS report plus one per recorded flow) instead of a single
+-- combined file, so (run_id, sid) alone is no longer unique.
 CREATE TABLE IF NOT EXISTS report_runs (
     run_id TEXT NOT NULL,
     sid TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'core_basis',
     docx_path TEXT,
     pdf_path TEXT,
     created_at TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (run_id, sid)
+    PRIMARY KEY (run_id, sid, label)
 );
 CREATE INDEX IF NOT EXISTS idx_reports_sid ON report_runs (sid, created_at DESC);
 """
@@ -65,6 +70,18 @@ class RunStore:
         # correct fix if this ever needs real concurrency.
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.executescript(_SCHEMA)
+        self._migrate_report_runs()
+
+    def _migrate_report_runs(self) -> None:
+        """D-035: older databases have report_runs without label/kind (and
+        with PK (run_id, sid)). Add the columns in place — existing rows keep
+        working, they just carry the default label."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(report_runs)")}
+        for name, decl in (("label", "TEXT NOT NULL DEFAULT ''"),
+                            ("kind", "TEXT NOT NULL DEFAULT 'core_basis'")):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE report_runs ADD COLUMN {name} {decl}")
+        self.conn.commit()
 
     def save(self, result: FlowRunResult) -> None:
         self.conn.execute(
@@ -122,18 +139,20 @@ class RunStore:
         return rows
 
     def save_report(self, run_id: str, sid: str, docx_path: str | None,
-                     pdf_path: str | None) -> None:
+                     pdf_path: str | None, label: str = "", kind: str = "core_basis") -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO report_runs (run_id, sid, docx_path, pdf_path) "
-            "VALUES (?, ?, ?, ?)", (run_id, sid, docx_path, pdf_path))
+            "INSERT OR REPLACE INTO report_runs "
+            "(run_id, sid, label, kind, docx_path, pdf_path) VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, sid, label, kind, docx_path, pdf_path))
         self.conn.commit()
 
     def recent_reports(self, sid: str | None = None, limit: int = 20) -> list[dict]:
-        q = ("SELECT run_id, sid, docx_path, pdf_path, created_at FROM report_runs "
+        q = ("SELECT run_id, sid, label, kind, docx_path, pdf_path, created_at "
+             "FROM report_runs "
              + ("WHERE sid = ? " if sid else "")
              + "ORDER BY created_at DESC LIMIT ?")
         args = (sid, limit) if sid else (limit,)
-        cols = ["run_id", "sid", "docx_path", "pdf_path", "created_at"]
+        cols = ["run_id", "sid", "label", "kind", "docx_path", "pdf_path", "created_at"]
         return [dict(zip(cols, r)) for r in self.conn.execute(q, args)]
 
     # ── D-032: deletion + single-run lookup ──────────────────────────────
@@ -151,16 +170,19 @@ class RunStore:
         d["payload"] = json.loads(d["payload"])
         return d
 
-    def delete_report(self, run_id: str, sid: str) -> list[str]:
-        """Remove the DB row; returns the file paths the caller should unlink
-        (the store owns rows, not the filesystem — keeps this testable and
-        makes the caller's deletion explicit)."""
-        row = self.conn.execute(
-            "SELECT docx_path, pdf_path FROM report_runs WHERE run_id = ? AND sid = ?",
-            (run_id, sid)).fetchone()
-        if row is None:
+    def delete_report(self, run_id: str, sid: str, label: str | None = None) -> list[str]:
+        """Remove the DB row(s); returns the file paths the caller should
+        unlink (the store owns rows, not the filesystem — keeps this testable
+        and makes the caller's deletion explicit).
+
+        D-035: with `label` omitted this deletes every report for the run+sid
+        (the pre-D-035 behaviour); pass a label to delete just one document."""
+        where = "WHERE run_id = ? AND sid = ?" + (" AND label = ?" if label is not None else "")
+        args = (run_id, sid) + ((label,) if label is not None else ())
+        rows = self.conn.execute(
+            f"SELECT docx_path, pdf_path FROM report_runs {where}", args).fetchall()
+        if not rows:
             return []
-        self.conn.execute("DELETE FROM report_runs WHERE run_id = ? AND sid = ?",
-                          (run_id, sid))
+        self.conn.execute(f"DELETE FROM report_runs {where}", args)
         self.conn.commit()
-        return [p for p in row if p]
+        return [p for row in rows for p in row if p]

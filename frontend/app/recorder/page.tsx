@@ -146,17 +146,33 @@ export default function RecorderPage() {
     }
   };
 
-  const onWheel = (e: React.WheelEvent<HTMLImageElement>) => {
+  // D-035: scrolling the remote page.
+  // React's onWheel is registered PASSIVE, so preventDefault() is ignored and
+  // the wheel scrolled this page instead of the SAP session — scrolling
+  // simply didn't work. A non-passive native listener fixes that. Deltas are
+  // also amplified: SAP's scroll containers ignore very small deltas.
+  useEffect(() => {
     const img = imgRef.current;
-    if (!img) return;
-    const r = img.getBoundingClientRect();
-    void send([{
-      kind: "wheel",
-      x: Math.round(((e.clientX - r.left) / r.width) * viewport.width),
-      y: Math.round(((e.clientY - r.top) / r.height) * viewport.height),
-      dx: e.deltaX, dy: e.deltaY,
-    }]);
-  };
+    if (!img || !recId) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = img.getBoundingClientRect();
+      void send([{
+        kind: "wheel",
+        x: Math.round(((e.clientX - r.left) / r.width) * viewport.width),
+        y: Math.round(((e.clientY - r.top) / r.height) * viewport.height),
+        dx: e.deltaX, dy: e.deltaY * 3,
+      }]);
+    };
+    img.addEventListener("wheel", handler, { passive: false });
+    return () => img.removeEventListener("wheel", handler);
+  }, [recId, frame, viewport, send]);
+
+  // Keyboard scrolling as a reliable alternative to the wheel.
+  const scrollBy = (dy: number) => void send([
+    { kind: "wheel", x: Math.round(viewport.width / 2),
+      y: Math.round(viewport.height / 2), dx: 0, dy },
+  ]);
 
   return (
     <div style={{ maxWidth: 1400 }} className="page-enter">
@@ -236,12 +252,26 @@ export default function RecorderPage() {
               // eslint-disable-next-line @next/next/no-img-element
               <img ref={imgRef} alt="Live SAP session"
                    src={`data:image/jpeg;base64,${frame}`}
-                   onClick={onImgClick} onWheel={onWheel}
+                   onClick={onImgClick}
                    style={{ width: "100%", display: "block", borderRadius: 8, cursor: "crosshair" }} />
             ) : (
               <div className="shimmer" style={{ height: 420, borderRadius: 8 }} />
             )}
-            <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>Scroll:</span>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={() => scrollBy(-400)}>↑ Up</button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={() => scrollBy(400)}>↓ Down</button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={capture} title="Insert a screenshot step at this scroll position">
+                📸 Capture this view
+              </button>
+              <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+                — or use your mouse wheel over the screen.
+              </span>
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 6 }}>
               Click directly on the screen above. Click this panel first, then type —
               keystrokes go to SAP. Enter and F-keys are recorded as SAP virtual keys.
             </div>

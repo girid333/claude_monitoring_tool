@@ -432,9 +432,11 @@ def reports(sid: str | None = None, limit: int = 20) -> list[dict]:
 
 
 @app.delete("/api/reports/{run_id}/{sid}")
-def delete_report(run_id: str, sid: str) -> dict:
-    """D-032: delete a generated report (DB row + the docx/pdf on disk)."""
-    paths = store.delete_report(run_id, sid)
+def delete_report(run_id: str, sid: str, label: str | None = None) -> dict:
+    """D-032/D-035: delete a generated report (DB row + the docx/pdf on
+    disk). `?label=` targets one document of a run; omitted deletes all of
+    that run+sid's reports."""
+    paths = store.delete_report(run_id, sid, label)
     if not paths:
         raise HTTPException(404, "report not found")
     removed = []
@@ -468,10 +470,12 @@ def download_reports_zip(run_id: str) -> FileResponse:
 
 
 @app.get("/api/reports/{run_id}/{sid}/download/{kind}")
-def download_report(run_id: str, sid: str, kind: str) -> FileResponse:
+def download_report(run_id: str, sid: str, kind: str, label: str | None = None) -> FileResponse:
     if kind not in ("docx", "pdf"):
         raise HTTPException(400, "kind must be docx or pdf")
     rows = [r for r in store.recent_reports(sid=sid, limit=200) if r["run_id"] == run_id]
+    if label is not None:  # D-035: a run has several documents now
+        rows = [r for r in rows if r.get("label") == label]
     if not rows or not rows[0].get(f"{kind}_path"):
         raise HTTPException(404, "report not found")
     path = rows[0][f"{kind}_path"]
@@ -655,7 +659,7 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
     from engine.probe import probe
     from engine.recovery import dismiss_known_popups
     from engine.schema import Flow
-    from engine.sections import CoreBasisSection, SectionResult, build_report
+    from engine.sections import CoreBasisSection, SectionResult, build_reports
 
     reg = Registry.load(SYSTEMS_PATH)
     creds = RegistryCredentialProvider(reg)  # D-025: registry sap_credential first, env vars fallback
@@ -738,9 +742,15 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                 if section_results:
                     await emit(run_id, {"type": "report_start", "sid": sid})
                     report_dir = str(Path("reports") / run_id)
-                    paths = build_report(section_results, output_dir=report_dir)
-                    store.save_report(run_id, sid, paths.get("docx"), paths.get("pdf"))
-                    await emit(run_id, {"type": "report_ready", "sid": sid, **paths})
+                    # D-035: separate documents per kind (Core BASIS vs each
+                    # recorded flow) instead of one combined file.
+                    artifacts = build_reports(section_results, output_dir=report_dir)
+                    for a in artifacts:
+                        store.save_report(run_id, sid, a.get("docx"), a.get("pdf"),
+                                           label=a.get("label", ""), kind=a.get("kind", ""))
+                    await emit(run_id, {"type": "report_ready", "sid": sid,
+                                        "reports": [{"label": a["label"], "kind": a["kind"]}
+                                                     for a in artifacts]})
             except Exception as exc:  # noqa: BLE001
                 await emit(run_id, {"type": "system_error", "sid": sid,
                                     "error": repr(exc)})

@@ -10,8 +10,8 @@ import { apiBase } from "../lib/api";
 const API = apiBase();
 
 type ReportRow = {
-  run_id: string; sid: string; docx_path: string | null;
-  pdf_path: string | null; created_at: string;
+  run_id: string; sid: string; label?: string; kind?: string;
+  docx_path: string | null; pdf_path: string | null; created_at: string;
 };
 
 export default function Reports() {
@@ -28,13 +28,15 @@ export default function Reports() {
   useEffect(load, [load]);
 
   const remove = async (r: ReportRow) => {
-    const key = `${r.run_id}-${r.sid}`;
+    const key = `${r.run_id}-${r.sid}-${r.label ?? ""}`;
     setBusy(key);
     setError("");
     try {
-      const res = await fetch(`${API}/api/reports/${r.run_id}/${r.sid}`, { method: "DELETE" });
+      const res = await fetch(
+        `${API}/api/reports/${r.run_id}/${r.sid}?label=${encodeURIComponent(r.label ?? "")}`,
+        { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      setReports(prev => prev.filter(x => `${x.run_id}-${x.sid}` !== key));
+      setReports(prev => prev.filter(x => `${x.run_id}-${x.sid}-${x.label ?? ""}` !== key));
     } catch (err) {
       setError(`Could not delete this report: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -64,21 +66,28 @@ export default function Reports() {
           </div>
         )}
         {reports.map((r, i) => {
-          const key = `${r.run_id}-${r.sid}`;
+          const key = `${r.run_id}-${r.sid}-${r.label ?? ""}`;
+          const q = `?label=${encodeURIComponent(r.label ?? "")}`;
+          const isFlow = r.kind === "flow";
           return (
             <div className="row rise" key={key} style={{ ["--i" as string]: Math.min(i, 10) }}>
-              <span className="rdot" style={{ background: "var(--blue)" }} />
+              <span className="rdot" style={{ background: isFlow ? "var(--green)" : "var(--blue)" }} />
               <div className="grow">
-                <div className="rtitle">{r.sid} · run {r.run_id}</div>
-                <div className="rsub">{r.created_at}</div>
+                <div className="rtitle">
+                  {r.label || "Core BASIS"}
+                  <span className="sev info" style={{ marginLeft: 8 }}>
+                    {isFlow ? "FLOW" : "CORE BASIS"}
+                  </span>
+                </div>
+                <div className="rsub">{r.sid} · {r.created_at} · run {r.run_id}</div>
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 {r.docx_path && (
-                  <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/${r.sid}/download/docx`}
+                  <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/${r.sid}/download/docx${q}`}
                      style={{ textDecoration: "none" }}>Word</a>
                 )}
                 {r.pdf_path && (
-                  <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/${r.sid}/download/pdf`}
+                  <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/${r.sid}/download/pdf${q}`}
                      style={{ textDecoration: "none" }}>PDF</a>
                 )}
                 <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/download/zip`}
