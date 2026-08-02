@@ -96,6 +96,9 @@ class Step(BaseModel):
 
     # capture-specific
     mode: Optional[list[Literal["screenshot", "table", "statusbar", "field"]]] = None
+    # D-039: paginated capture — scroll a page at a time and shoot each one,
+    # stopping when the view stops changing (or after `pages`, max 25).
+    pages: Optional[int] = None
 
     # check-specific
     type: Optional[Literal["row_count", "cell_value", "statusbar_type", "field_value", "text"]] = None
@@ -127,6 +130,7 @@ class StepResult(BaseModel):
     confidence: Optional[float] = None          # DOM resolver confidence (D-003)
     detail: str = ""
     screenshot_path: Optional[str] = None
+    screenshot_paths: Optional[list[str]] = None   # D-039: paginated capture
     extracted: Optional[Any] = None             # structured capture payload
 
 

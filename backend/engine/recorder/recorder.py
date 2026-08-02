@@ -239,7 +239,8 @@ class Recorder:
             if s.act == Act.START_TCODE:
                 label = f"T-code {s.value}"
             elif s.act == Act.CAPTURE:
-                label = "screenshot"
+                label = (f"screenshot — all pages (max {s.pages})" if s.pages
+                         else "screenshot")
             elif s.act == Act.SCROLL:
                 v = s.value if isinstance(s.value, dict) else {}
                 label = (f"scroll {int(v.get('dy', 0))}px" if "dy" in v
@@ -266,6 +267,13 @@ class Recorder:
 
     def add_capture(self, note: str = "") -> None:
         self.events.append({"kind": "capture", "value": note})
+
+    def add_capture_pages(self, max_pages: int = 25, x: float = 0, y: float = 0,
+                           page_delta: float = 600) -> None:
+        """D-039: capture the whole scrollable list, one page at a time."""
+        self.events.append({"kind": "capture_pages",
+                             "value": {"pages": max(1, min(int(max_pages), 25)),
+                                        "x": x, "y": y, "page_delta": page_delta}})
 
     def add_wheel(self, x: float, y: float, dx: float, dy: float) -> None:
         """D-038: record a scroll GESTURE (not a scroll position).
@@ -310,6 +318,11 @@ class Recorder:
             elif kind == "capture":
                 # D-034: screenshot evidence at a point the user chose.
                 steps.append(Step(act=Act.CAPTURE, mode=["screenshot"]))
+
+            elif kind == "capture_pages":
+                v = ev.get("value") or {}
+                steps.append(Step(act=Act.CAPTURE, mode=["screenshot"],
+                                   pages=v.get("pages", 25), value=v))
 
             elif kind == "set":
                 # Collapse repeated edits of the same field into one step

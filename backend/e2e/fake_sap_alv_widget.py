@@ -18,7 +18,7 @@ SESSION = """<html><body style="margin:0;font:13px monospace">
 <script>
 // Virtualised rows: the "scroll" repaints content; scrollTop stays 0 forever,
 // exactly like SAP's ALV scrollbar widget.
-var offset = 0, PAGE = 20, TOTAL = 400;
+var offset = 0, PAGE = 20, TOTAL = 150;
 function paint() {
   var h = "";
   for (var i = offset; i < Math.min(offset + PAGE, TOTAL); i++)

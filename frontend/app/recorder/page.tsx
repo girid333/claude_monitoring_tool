@@ -101,12 +101,12 @@ export default function RecorderPage() {
     } finally { setBusy(false); }
   };
 
-  const capture = async () => {
+  const capture = async (pages = 0) => {
     if (!recId) return;
     try {
       const res = await fetch(`${API}/api/recorder/capture`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recording_id: recId }),
+        body: JSON.stringify({ recording_id: recId, pages }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = await res.json();
@@ -228,9 +228,13 @@ export default function RecorderPage() {
                                               background: "var(--red)" }} />
             <span style={{ fontSize: 13, fontWeight: 600 }}>Recording {sid}</span>
             <span style={{ fontSize: 12, color: "var(--text-3)" }}>{steps.length} steps</span>
-            <button className="btn secondary" disabled={busy} onClick={capture}
+            <button className="btn secondary" disabled={busy} onClick={() => capture(0)}
                     title="Insert a screenshot step here — it appears as evidence in the report">
-              📸 Capture screenshot
+              📸 Capture screen
+            </button>
+            <button className="btn secondary" disabled={busy} onClick={() => capture(25)}
+                    title="On replay, scroll the list a page at a time and screenshot every page (stops automatically at the end, max 25)">
+              📄 Capture all pages
             </button>
             <label style={{ fontSize: 12.5, color: "var(--text-2)", marginLeft: 6 }}>Name</label>
             <input className="input" value={flowId} onChange={e => setFlowId(e.target.value)}
@@ -264,8 +268,13 @@ export default function RecorderPage() {
               <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
                       onClick={() => scrollBy(400)}>↓ Down</button>
               <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
-                      onClick={capture} title="Insert a screenshot step at this scroll position">
+                      onClick={() => capture(0)} title="Insert a screenshot step at this scroll position">
                 📸 Capture this view
+              </button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={() => capture(25)}
+                      title="Scroll from here to the end at replay time, capturing every page">
+                📄 Capture all pages from here
               </button>
               <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>
                 — or use your mouse wheel over the screen.

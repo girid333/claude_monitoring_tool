@@ -206,8 +206,11 @@ def flow_results_to_report_rows(results: list[FlowRunResult]) -> list[dict]:
             "flow_id": fr.flow_id, "sid": fr.sid, "mode": fr.mode,
             "ok": fr.ok, "worst_severity": worst,
             "anomalies": anomalies,
-            "screenshots": [s.screenshot_path for s in fr.steps
-                            if s.screenshot_path],
+            # D-039: a paginated capture yields many screenshots from one
+            # step — flatten them all into the report's evidence list.
+            "screenshots": [p for s in fr.steps
+                            for p in (s.screenshot_paths
+                                      or ([s.screenshot_path] if s.screenshot_path else []))],
             "low_confidence_steps": [s.index for s in fr.steps
                                      if s.confidence is not None
                                      and s.confidence < 0.75],

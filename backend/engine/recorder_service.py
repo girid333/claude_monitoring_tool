@@ -59,6 +59,9 @@ class RecordingSession:
     error: str | None = None
     last_frame: str | None = None            # base64 JPEG
     frame_listeners: list[Callable[[str], None]] = field(default_factory=list)
+    # D-039: where the user last scrolled — paginated capture aims its wheel
+    # at the same container rather than guessing the viewport centre.
+    last_wheel: tuple[float, float] | None = None
 
 
 _sessions: dict[str, RecordingSession] = {}
@@ -217,6 +220,7 @@ async def dispatch_input(recording_id: str, ev: dict) -> None:
         # DOM 'scroll' listener because SAP's ALV scrollbar repaints rows
         # without changing scrollTop — no scroll event, nothing to record.
         s.recorder.add_wheel(x, y, dx, dy)
+        s.last_wheel = (x, y)
     elif kind == "text":
         # Plain text entry — insertText is far more reliable than synthesising
         # per-character key events for auto-complete-heavy SAP fields.
@@ -236,11 +240,18 @@ async def dispatch_input(recording_id: str, ev: dict) -> None:
         raise ValueError(f"unknown input kind: {kind!r}")
 
 
-def add_capture_step(recording_id: str, note: str = "") -> dict:
-    """D-034: user pressed 'Capture screenshot' — insert an evidence step at
-    this exact point in the recorded sequence."""
+def add_capture_step(recording_id: str, note: str = "", pages: int = 0) -> dict:
+    """D-034/D-039: insert an evidence step at this point in the recording.
+
+    `pages > 0` makes it a paginated capture: at replay it scrolls the list
+    one page at a time, shooting each page until the view stops changing.
+    """
     s = get_session(recording_id)
-    s.recorder.add_capture(note)
+    if pages:
+        x, y = s.last_wheel or (VIEWPORT["width"] / 2, VIEWPORT["height"] / 2)
+        s.recorder.add_capture_pages(max_pages=pages, x=x, y=y)
+    else:
+        s.recorder.add_capture(note)
     return {"steps": s.recorder.steps_preview()}
 
 

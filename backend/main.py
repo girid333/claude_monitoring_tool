@@ -556,14 +556,15 @@ def recorder_active() -> list[dict]:
 class RecorderCaptureRequest(BaseModel):
     recording_id: str
     note: str = ""
+    pages: int = 0      # D-039: >0 = paginated capture (scroll page by page)
 
 
 @app.post("/api/recorder/capture")
 def recorder_capture(req: RecorderCaptureRequest) -> dict:
-    """D-034: insert a screenshot-evidence step at this point in the recording."""
+    """D-034/D-039: insert a screenshot-evidence step at this point."""
     from engine.recorder_service import add_capture_step
     try:
-        return add_capture_step(req.recording_id, req.note)
+        return add_capture_step(req.recording_id, req.note, pages=req.pages)
     except KeyError:
         raise HTTPException(404, "unknown recording_id")
 

@@ -179,8 +179,60 @@ class ReplayEngine:
         return StepResult(index=i, act=step.act, ok=False,
                           detail=f"unknown act {step.act}")
 
+    async def _capture_pages(self, i: int, step: Step) -> StepResult:
+        """D-039: capture a long list page by page.
+
+        Scrolling to two arbitrary offsets produced a first page and a last
+        page with everything between missing. This walks the content one
+        viewport at a time instead, and stops as soon as a page looks
+        identical to the one before it — which is the only implementation-
+        agnostic way to detect "no more to scroll", since SAP's ALV widget
+        never changes scrollTop (see D-038).
+        """
+        import hashlib
+
+        max_pages = max(1, min(int(step.pages or 25), 25))
+        pos = step.value if isinstance(step.value, dict) else {}
+        x = float(pos.get("x", 0) or (self.page.viewport_size or {}).get("width", 1280) / 2)
+        y = float(pos.get("y", 0) or (self.page.viewport_size or {}).get("height", 800) / 2)
+        page_delta = float(pos.get("page_delta", 600))
+
+        self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[str] = []
+        seen: set[str] = set()
+        await self.page.mouse.move(x, y)
+
+        for p in range(max_pages):
+            path = self.artifact_dir / f"{self.run_id}_{self.sid}_step{i}_p{p + 1}.png"
+            shot = await self.page.screenshot(path=str(path), full_page=False)
+            digest = hashlib.sha1(shot).hexdigest()
+            if digest in seen:
+                # Nothing new appeared — we're at the end of the list.
+                Path(path).unlink(missing_ok=True)
+                break
+            seen.add(digest)
+            paths.append(str(path))
+            # Scroll one page. Chunked, because SAP coalesces a single large
+            # delta into one small scroll (same reason as D-038).
+            remaining = page_delta
+            while remaining > 1:
+                chunk = min(300.0, remaining)
+                await self.page.mouse.wheel(0, chunk)
+                remaining -= chunk
+                await self.page.wait_for_timeout(50)
+            await self.page.wait_for_timeout(350)   # let the grid repaint
+
+        return StepResult(index=i, act=step.act, ok=True,
+                          resolver=self.resolver.name,
+                          screenshot_path=paths[0] if paths else None,
+                          screenshot_paths=paths,
+                          detail=f"{len(paths)} page(s) captured"
+                                  + (" (hit max)" if len(paths) == max_pages else ""))
+
     async def _capture(self, i: int, step: Step, last_capture: dict) -> StepResult:
         modes = step.mode or ["screenshot"]
+        if step.pages and "screenshot" in modes:
+            return await self._capture_pages(i, step)
         sr = StepResult(index=i, act=step.act, ok=True, resolver=self.resolver.name)
         if "screenshot" in modes:
             self.artifact_dir.mkdir(parents=True, exist_ok=True)
