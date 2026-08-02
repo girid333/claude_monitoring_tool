@@ -60,16 +60,57 @@ class DomResolver(Resolver):
             if await self._usable(loc):
                 return Resolution(loc, 0.80, f"text:{dom.label}", self.name)
 
-        # Tier 3 — css_hint (TODO Phase 1: implement fragment matching + proximity to label)
-        if dom.css_hint:
-            tried.append(f"css_hint:{dom.css_hint} (tier not yet implemented)")
+        # Tier 2b — D-033: visible text of the element itself (buttons, tabs,
+        # tree nodes and table cells are overwhelmingly identified this way in
+        # WebGUI, and it's what the recorder captures most reliably).
+        if dom.text:
+            tag = dom.tag or "*"
+            loc = self.page.locator(tag, has_text=dom.text).first
+            tried.append(f"tag+text:{tag}:{dom.text}")
+            if await self._usable(loc):
+                return Resolution(loc, 0.78, f"tag+text:{tag}:{dom.text}", self.name)
+            loc = self.page.get_by_text(dom.text, exact=True).first
+            tried.append(f"text:{dom.text}")
+            if await self._usable(loc):
+                return Resolution(loc, 0.75, f"text:{dom.text}", self.name)
 
-        # Tier 4 — pos_id (TODO Phase 1: direct id lookup, always low confidence)
+        # Tier 3 — D-033: SAP UI-library class fragment, disambiguated by the
+        # element's tag and (when known) its input type. Deliberately narrow:
+        # a bare class fragment matches dozens of nodes, so this only counts
+        # as a hit when it resolves to something usable AND we can pin the
+        # tag — hence the modest confidence, which flags it in the report.
+        if dom.css_hint:
+            tag = dom.tag or "*"
+            sel = f'{tag}.{dom.css_hint}'
+            if dom.input_type:
+                sel += f'[type="{dom.input_type}"]'
+            loc = self.page.locator(sel)
+            tried.append(f"css_hint:{sel}")
+            idx = dom.nth or 0
+            try:
+                if await loc.count() > idx:
+                    cand = loc.nth(idx)
+                    if await self._usable(cand):
+                        return Resolution(cand, 0.60, f"css_hint:{sel}#{idx}", self.name)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Tier 4 — pos_id: exact positional WebGUI id. Fast when the screen is
+        # unchanged, worthless after a layout shift — always low confidence.
         if dom.pos_id:
             loc = self.page.locator(f'[id="{dom.pos_id}"]').first
             tried.append(f"pos_id:{dom.pos_id}")
             if await self._usable(loc):
                 return Resolution(loc, 0.40, f"pos_id:{dom.pos_id}", self.name)
+
+        # Tier 5 — D-033: structural CSS path. Last resort by definition; a
+        # match here means "same shape of DOM", not "same element", so it is
+        # always flagged (well below the 0.75 threshold).
+        if dom.path:
+            loc = self.page.locator(dom.path).first
+            tried.append(f"path:{dom.path}")
+            if await self._usable(loc):
+                return Resolution(loc, 0.35, f"path:{dom.path}", self.name)
 
         raise ResolveError(target, tried)
 

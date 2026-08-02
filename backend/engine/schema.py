@@ -21,6 +21,10 @@ class DomCandidates(BaseModel):
       2. label       — visible text or aria role+name (Playwright get_by_*)
       3. css_hint    — SAP UI-library class fragment (e.g. 'lsField__input')
       4. pos_id      — positional WebGUI id, last resort, low confidence
+
+    D-033 additions (recorder is DOM-first now — see Target.sid): `text`,
+    `tag`, `input_type`, `nth` and `path` give the resolver enough to find
+    an element on a scripting-disabled system, which is the common case.
     """
 
     attr: Optional[dict[str, str]] = None      # e.g. {"name": "sap-user"} or {"title": "Job name"}
@@ -28,12 +32,28 @@ class DomCandidates(BaseModel):
     role: Optional[str] = None                 # aria role, used with label
     css_hint: Optional[str] = None             # class fragment, not full selector
     pos_id: Optional[str] = None               # e.g. "M0:46:::4:20"
+    text: Optional[str] = None                 # D-033: trimmed visible text
+    tag: Optional[str] = None                  # D-033: lowercase tag name
+    input_type: Optional[str] = None           # D-033: input's type attribute
+    nth: Optional[int] = None                  # D-033: index among identical matches
+    path: Optional[str] = None                 # D-033: structural CSS path, last resort
+    frame_url: Optional[str] = None            # D-033: iframe the element lives in
 
 
 class Target(BaseModel):
-    """Abstract target descriptor (D-002): scripting ID + DOM candidates."""
+    """Abstract target descriptor (D-002): scripting ID + DOM candidates.
 
-    sid: str = Field(..., description="Window-relative scripting ID, e.g. wnd[0]/usr/ctxtBTCH2170-FROM_DATE")
+    D-033: `sid` is now OPTIONAL. The original schema required it because
+    recording was assumed to happen on a scripting-enabled system (D-004).
+    In practice SAP WebGUI installations commonly run with
+    `sapgui/user_scripting = FALSE` — v1 monitors them fine without it — so
+    a recorder that can only emit scripting IDs records nothing usable.
+    DOM-only targets are first-class (that's D-003's whole premise); the
+    scripting ID is captured as a bonus when the API happens to be there.
+    """
+
+    sid: Optional[str] = Field(
+        None, description="Window-relative scripting ID when available, e.g. wnd[0]/usr/ctxtBTCH2170-FROM_DATE")
     dom: Optional[DomCandidates] = None
 
 

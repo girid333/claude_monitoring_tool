@@ -15,7 +15,9 @@ Endpoints:
   GET  /api/reports/{run_id}/download/zip  all reports for a run bundled (v1's "Download All Reports (ZIP)", D-027)
   DELETE /api/reports/{run_id}/{sid}      delete a report (row + files on disk, D-032)
   GET  /api/runs/core-basis/{run_id}/{sid}  per-T-code anomaly summary for one run (D-032)
-  POST /api/recorder/start                {sid} -> open a headed browser + start recording (D-004)
+  POST /api/recorder/start                {sid} -> headless browser + screencast recording (D-033)
+  GET  /api/recorder/frame/{recording_id}   latest screencast frame (base64 JPEG, D-033)
+  POST /api/recorder/input                 forward mouse/keyboard into that browser (D-033)
   GET  /api/recorder/status/{recording_id}  live event count for the Recorder page
   GET  /api/recorder/active               all in-progress recording sessions
   POST /api/recorder/stop                 {recording_id, flow_id} -> save flows/{flow_id}.json
@@ -477,15 +479,14 @@ def download_report(run_id: str, sid: str, kind: str) -> FileResponse:
     return FileResponse(path, filename=Path(path).name)
 
 
-# ── Recorder (Phase 2, D-004) ────────────────────────────────────────────
-# A recording session is a HEADED Playwright browser a human drives
-# interactively; see engine/recorder_service.py for why this can't be a
-# background task like /api/run. Only usable when the backend runs on a
-# machine with a display (README's "run locally" model).
+# ── Recorder (Phase 2, D-033) ────────────────────────────────────────────
+# The browser is HEADLESS and server-side; the human drives it remotely
+# through streamed frames (CDP screencast) with input forwarded back. This
+# works in containers — the old headed-browser design did not, which is why
+# recording used to be gated behind a 501 here.
 
 @app.post("/api/recorder/start")
 async def recorder_start(req: RecorderStartRequest) -> dict:
-    _require_display()
     from engine.recorder_service import start_recording
     try:
         session = await start_recording(req.sid, registry_path=SYSTEMS_PATH)  # D-028
@@ -493,7 +494,42 @@ async def recorder_start(req: RecorderStartRequest) -> dict:
         raise HTTPException(404, f"unknown sid {req.sid!r} in systems.json")
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"could not start recording: {exc}")
-    return {"recording_id": session.recording_id, "sid": session.sid}
+    from engine.recorder_service import VIEWPORT
+    return {"recording_id": session.recording_id, "sid": session.sid,
+            "viewport": VIEWPORT}
+
+
+@app.get("/api/recorder/frame/{recording_id}")
+async def recorder_frame(recording_id: str) -> dict:
+    """D-033: latest screencast frame as base64 JPEG. The UI polls this (a
+    WebSocket would be marginally cheaper, but polling survives the proxies
+    and reverse-proxies people put in front of this without extra config)."""
+    from engine.recorder_service import screenshot
+    try:
+        return {"frame": await screenshot(recording_id)}
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+
+
+class RecorderInputRequest(BaseModel):
+    recording_id: str
+    events: list[dict]      # batched: [{kind:"click",x,y} | {kind:"text",text} | ...]
+
+
+@app.post("/api/recorder/input")
+async def recorder_input(req: RecorderInputRequest) -> dict:
+    """D-033: forward user input into the server-side browser."""
+    from engine.recorder_service import dispatch_input
+    try:
+        for ev in req.events:
+            await dispatch_input(req.recording_id, ev)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"input failed: {exc}")
+    return {"ok": True}
 
 
 @app.get("/api/recorder/status/{recording_id}")
