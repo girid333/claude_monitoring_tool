@@ -135,3 +135,32 @@ class RunStore:
         args = (sid, limit) if sid else (limit,)
         cols = ["run_id", "sid", "docx_path", "pdf_path", "created_at"]
         return [dict(zip(cols, r)) for r in self.conn.execute(q, args)]
+
+    # ── D-032: deletion + single-run lookup ──────────────────────────────
+
+    def get_core_basis(self, run_id: str, sid: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT run_id, sid, ok, anomaly_count, notes, started_at, payload "
+            "FROM core_basis_runs WHERE run_id = ? AND sid = ?", (run_id, sid)).fetchone()
+        if row is None:
+            return None
+        cols = ["run_id", "sid", "ok", "anomaly_count", "notes", "started_at", "payload"]
+        d = dict(zip(cols, row))
+        d["ok"] = bool(d["ok"])
+        d["notes"] = json.loads(d["notes"]) if d["notes"] else []
+        d["payload"] = json.loads(d["payload"])
+        return d
+
+    def delete_report(self, run_id: str, sid: str) -> list[str]:
+        """Remove the DB row; returns the file paths the caller should unlink
+        (the store owns rows, not the filesystem — keeps this testable and
+        makes the caller's deletion explicit)."""
+        row = self.conn.execute(
+            "SELECT docx_path, pdf_path FROM report_runs WHERE run_id = ? AND sid = ?",
+            (run_id, sid)).fetchone()
+        if row is None:
+            return []
+        self.conn.execute("DELETE FROM report_runs WHERE run_id = ? AND sid = ?",
+                          (run_id, sid))
+        self.conn.commit()
+        return [p for p in row if p]

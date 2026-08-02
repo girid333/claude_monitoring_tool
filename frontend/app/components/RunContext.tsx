@@ -116,7 +116,12 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
           case "run_error":
             next.errors = [...prev.errors, `Run failed: ${ev.error ?? "unknown error"}`];
             break;
-          case "run_done":
+          case "run_done": {
+            // D-032 belt-and-braces: whatever the event ordering, nothing may
+            // still be "running" once the run is over.
+            const st = { ...prev.tcodeStatus };
+            for (const k of Object.keys(st)) if (st[k] === "running") st[k] = "done";
+            next.tcodeStatus = st;
             next.done = true;
             next.runId = null;
             next.phase = "";
@@ -124,6 +129,7 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
             esRef.current = null;
             try { localStorage.removeItem(STORAGE_KEY); } catch {}
             break;
+          }
         }
         return next;
       });

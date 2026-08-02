@@ -13,6 +13,8 @@ Endpoints:
   GET  /api/reports?sid=                  recent generated Word/PDF reports (D-014)
   GET  /api/reports/{run_id}/{sid}/download/{docx|pdf}   fetch a generated report file
   GET  /api/reports/{run_id}/download/zip  all reports for a run bundled (v1's "Download All Reports (ZIP)", D-027)
+  DELETE /api/reports/{run_id}/{sid}      delete a report (row + files on disk, D-032)
+  GET  /api/runs/core-basis/{run_id}/{sid}  per-T-code anomaly summary for one run (D-032)
   POST /api/recorder/start                {sid} -> open a headed browser + start recording (D-004)
   GET  /api/recorder/status/{recording_id}  live event count for the Recorder page
   GET  /api/recorder/active               all in-progress recording sessions
@@ -263,6 +265,20 @@ async def emit(run_id: str, event: dict) -> None:
         await q.put(event)
 
 
+def emit_sync(run_id: str, event: dict) -> None:
+    """D-032: ordered, synchronous enqueue for callbacks that cannot await.
+
+    The queue is unbounded, so put_nowait never blocks or fails. Using this
+    instead of `loop.create_task(emit(...))` is what guarantees ORDERING:
+    scheduled tasks flush whenever the loop next yields, so v1's final
+    progress messages could land AFTER core_basis_done and re-mark an
+    already-finished T-code as 'running' — which is exactly why the last
+    T-code stayed blue at 22/23 instead of turning green."""
+    q = _event_queues.get(run_id)
+    if q:
+        q.put_nowait(event)
+
+
 @app.get("/api/systems")
 def systems() -> list[dict]:
     reg = Registry.load(SYSTEMS_PATH)
@@ -380,9 +396,52 @@ def core_basis_runs(sid: str | None = None, limit: int = 20) -> list[dict]:
     return store.recent_core_basis(sid=sid, limit=limit)
 
 
+@app.get("/api/runs/core-basis/{run_id}/{sid}")
+def core_basis_detail(run_id: str, sid: str) -> dict:
+    """D-032: per-run anomaly summary for the expandable Runs row.
+
+    v1's raw results dict is large (screenshots, full data payloads); this
+    returns only what a human triaging a run needs: per-T-code anomaly
+    lists plus the external (SSH/URL) check outcomes."""
+    row = store.get_core_basis(run_id, sid)
+    if row is None:
+        raise HTTPException(404, "run not found")
+    payload = row.get("payload") or {}
+    tcodes = [
+        {"tcode": t.get("tcode"), "name": t.get("name"),
+         "anomalies": t.get("anomalies") or [],
+         "summary": t.get("analysis_summary") or ""}
+        for t in payload.get("tcodes", [])
+    ]
+    return {
+        "run_id": row["run_id"], "sid": row["sid"], "ok": row["ok"],
+        "started_at": row["started_at"], "notes": row["notes"],
+        "anomaly_count": row["anomaly_count"],
+        "tcodes_with_anomalies": [t for t in tcodes if t["anomalies"]],
+        "tcodes_clean": [t["tcode"] for t in tcodes if not t["anomalies"]],
+        "external_checks": payload.get("external_checks", []),
+    }
+
+
 @app.get("/api/reports")
 def reports(sid: str | None = None, limit: int = 20) -> list[dict]:
     return store.recent_reports(sid=sid, limit=limit)
+
+
+@app.delete("/api/reports/{run_id}/{sid}")
+def delete_report(run_id: str, sid: str) -> dict:
+    """D-032: delete a generated report (DB row + the docx/pdf on disk)."""
+    paths = store.delete_report(run_id, sid)
+    if not paths:
+        raise HTTPException(404, "report not found")
+    removed = []
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+            removed.append(p)
+        except OSError as exc:  # noqa: PERF203 - report per-file failures
+            removed.append(f"{p} (could not delete: {exc})")
+    return {"deleted": True, "files": removed}
 
 
 @app.get("/api/reports/{run_id}/download/zip")
@@ -549,17 +608,16 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                     await emit(run_id, {"type": "core_basis_start", "sid": sid,
                                         "tcodes": section.tcode_list()})
 
-                    loop = asyncio.get_running_loop()
-
                     def on_status(msg: str, _sid=sid) -> None:
                         # SYNC by contract — v1's take_screenshots() calls this
                         # without awaiting (see CoreBasisSection.run docstring).
-                        # Schedule the emit instead of awaiting it here.
-                        loop.create_task(emit(run_id, {
+                        # emit_sync (not create_task) keeps these ORDERED
+                        # relative to core_basis_done — see D-032.
+                        emit_sync(run_id, {
                             "type": "core_basis_progress", "sid": _sid,
                             "message": msg, "tcode": _parse_tcode(msg),
                             "level": "warn" if msg.lower().startswith("warning") else "info",
-                        }))
+                        })
 
                     sr = await section.run(engine, run_id, sid, on_status=on_status)
                     anomaly_count = len((sr.v1_results or {}).get("anomalies", []))
