@@ -170,34 +170,14 @@ _INJECT_JS = r"""
     if (ev.key === "Enter" || /^F\d{1,2}$/.test(ev.key)) emit("key", ev, ev.target);
   }, true);
 
-  // D-037: record SCROLL POSITION.
-  // Without this, scrolling during recording was invisible to the flow, so
-  // every screenshot the user captured after scrolling replayed from the
-  // top of the page — all captures came out identical. SAP's ALV grids
-  // scroll an inner container, not the document, so we record which element
-  // scrolled and to what offset.
-  let scrollTimer = null;
-  document.addEventListener("scroll", ev => {
-    const el = ev.target;
-    clearTimeout(scrollTimer);
-    // Debounce: a single flick fires dozens of events; only the resting
-    // position matters for replay.
-    scrollTimer = setTimeout(() => {
-      try {
-        const isDoc = (el === document) || (el === document.documentElement) || (el === window);
-        const node = isDoc ? document.documentElement : el;
-        const top = isDoc ? (window.scrollY || node.scrollTop || 0) : node.scrollTop;
-        const left = isDoc ? (window.scrollX || node.scrollLeft || 0) : node.scrollLeft;
-        if (!top && !left) return;              // back at origin: nothing to restore
-        window.__rec_emit({
-          kind: "scroll",
-          value: { top: Math.round(top), left: Math.round(left), doc: isDoc },
-          dom: isDoc ? null : domMeta(node),
-          sid: null, ts: Date.now(),
-        });
-      } catch (e) {}
-    }, 260);
-  }, true);
+  // NOTE (D-038): scrolling is NOT captured here.
+  // A DOM 'scroll' listener only fires when something actually changes
+  // scrollTop, and SAP WebGUI's ALV grids frequently scroll through their
+  // own scrollbar widget (repainting rows) without ever touching scrollTop —
+  // so on a real system this recorded nothing and every replayed screenshot
+  // came back identical. Scroll is captured server-side as the WHEEL GESTURE
+  // that produced it (recorder_service.dispatch_input), which reproduces on
+  // replay regardless of how the grid implements scrolling.
 })();
 """
 
@@ -261,9 +241,9 @@ class Recorder:
             elif s.act == Act.CAPTURE:
                 label = "screenshot"
             elif s.act == Act.SCROLL:
-                pos = s.value if isinstance(s.value, dict) else {}
-                label = f"scroll to {pos.get('top', 0)}px" + (
-                    "" if pos.get("doc") else f" ({label or 'container'})")
+                v = s.value if isinstance(s.value, dict) else {}
+                label = (f"scroll {int(v.get('dy', 0))}px" if "dy" in v
+                         else f"scroll to {v.get('top', 0)}px")
             out.append({
                 "act": s.act.value,
                 "target": label or (t.sid if t else None) or "—",
@@ -286,6 +266,27 @@ class Recorder:
 
     def add_capture(self, note: str = "") -> None:
         self.events.append({"kind": "capture", "value": note})
+
+    def add_wheel(self, x: float, y: float, dx: float, dy: float) -> None:
+        """D-038: record a scroll GESTURE (not a scroll position).
+
+        Replaying the same wheel at the same coordinates works whether the
+        target scrolls natively or through SAP's own scrollbar widget —
+        recording `scrollTop` only works for the former, which is why the
+        first attempt (D-037) produced identical screenshots on a real ALV
+        grid. Consecutive wheels at roughly the same spot accumulate, so a
+        long flick becomes one step rather than forty."""
+        if self.paused:
+            return
+        last = self.events[-1] if self.events else None
+        if (last and last.get("kind") == "wheel"
+                and abs(last["value"]["x"] - x) < 40
+                and abs(last["value"]["y"] - y) < 40):
+            last["value"]["dy"] += dy
+            last["value"]["dx"] += dx
+            return
+        self.events.append({"kind": "wheel",
+                             "value": {"x": x, "y": y, "dx": dx, "dy": dy}})
 
     async def stop(self, flow_id: str, description: str = "") -> Flow:
         steps = self._coalesce(self.events)
@@ -326,9 +327,13 @@ class Recorder:
                 steps.append(Step(act=Act.PRESS, target=target))
                 steps.append(Step(act=Act.WAIT_READY))
 
+            elif kind == "wheel":
+                # D-038: a scroll gesture — replayed as a real wheel event.
+                steps.append(Step(act=Act.SCROLL, value=ev.get("value")))
+
             elif kind == "scroll":
-                # D-037: collapse consecutive scrolls of the same container —
-                # only the resting position needs replaying.
+                # Legacy D-037 shape (scroll position). Still honoured on
+                # replay so flows recorded before D-038 keep working.
                 if (steps and steps[-1].act == Act.SCROLL
                         and _same_scroll_target(steps[-1].target, target)):
                     steps[-1].value = ev.get("value")

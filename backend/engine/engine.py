@@ -120,10 +120,36 @@ class ReplayEngine:
             return StepResult(index=i, act=step.act, ok=True)
 
         if step.act == Act.SCROLL:
-            # D-037: restore the scroll position the user was looking at, so
-            # a following CAPTURE shows what they actually saw. Without this
-            # every screenshot after a scroll replayed from the top.
             pos = step.value if isinstance(step.value, dict) else {}
+
+            # D-038: gesture replay — the recorded wheel, at the recorded
+            # coordinates. Works whether the target scrolls natively or via
+            # SAP's own scrollbar widget (which never touches scrollTop, so
+            # D-037's position-restoring approach silently did nothing on a
+            # real ALV grid). Deltas are applied in chunks because SAP
+            # coalesces large single deltas into one small scroll.
+            if "dy" in pos or "dx" in pos:
+                x, y = float(pos.get("x", 640)), float(pos.get("y", 400))
+                dx, dy = float(pos.get("dx", 0)), float(pos.get("dy", 0))
+                await self.page.mouse.move(x, y)
+                remaining_y, remaining_x = dy, dx
+                step_y = 400 if dy >= 0 else -400
+                step_x = 400 if dx >= 0 else -400
+                guard = 0
+                while (abs(remaining_y) > 1 or abs(remaining_x) > 1) and guard < 60:
+                    cy = step_y if abs(remaining_y) > abs(step_y) else remaining_y
+                    cx = step_x if abs(remaining_x) > abs(step_x) else remaining_x
+                    await self.page.mouse.wheel(cx, cy)
+                    remaining_y -= cy
+                    remaining_x -= cx
+                    guard += 1
+                    await self.page.wait_for_timeout(60)
+                await self.page.wait_for_timeout(300)   # let the grid repaint
+                return StepResult(index=i, act=step.act, ok=True,
+                                  resolver=self.resolver.name,
+                                  detail=f"wheel {int(dx)},{int(dy)} at {int(x)},{int(y)}")
+
+            # Legacy (D-037) position-restoring shape.
             top, left = int(pos.get("top", 0)), int(pos.get("left", 0))
             if step.target is not None and step.target.dom is not None:
                 try:

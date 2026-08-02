@@ -208,10 +208,15 @@ async def dispatch_input(recording_id: str, ev: dict) -> None:
             "type": "mouseMoved", "x": float(ev.get("x", 0)), "y": float(ev.get("y", 0)),
         })
     elif kind == "wheel":
+        x, y = float(ev.get("x", 0)), float(ev.get("y", 0))
+        dx, dy = float(ev.get("dx", 0)), float(ev.get("dy", 0))
         await s.cdp.send("Input.dispatchMouseEvent", {
-            "type": "mouseWheel", "x": float(ev.get("x", 0)), "y": float(ev.get("y", 0)),
-            "deltaX": float(ev.get("dx", 0)), "deltaY": float(ev.get("dy", 0)),
+            "type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy,
         })
+        # D-038: record the gesture itself. Captured here rather than from a
+        # DOM 'scroll' listener because SAP's ALV scrollbar repaints rows
+        # without changing scrollTop — no scroll event, nothing to record.
+        s.recorder.add_wheel(x, y, dx, dy)
     elif kind == "text":
         # Plain text entry — insertText is far more reliable than synthesising
         # per-character key events for auto-complete-heavy SAP fields.
