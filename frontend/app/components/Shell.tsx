@@ -10,6 +10,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LayoutGrid, PlayCircle, Radar, FileText, Server } from "lucide-react";
 import type { ReactNode } from "react";
+import { useRun } from "./RunContext";
 
 const NAV = [
   { href: "/", label: "Landscape", icon: LayoutGrid },
@@ -21,6 +22,7 @@ const NAV = [
 
 export default function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const run = useRun();
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
@@ -54,7 +56,7 @@ export default function Shell({ children }: { children: ReactNode }) {
           {NAV.map(({ href, label, icon: Icon }) => {
             const active = pathname === href;
             return (
-              <Link key={href} href={href} style={{
+              <Link key={href} href={href} className={`navlink${active ? " active" : ""}`} style={{
                 display: "flex", alignItems: "center", gap: 10,
                 padding: "7px 10px", borderRadius: "var(--r-sm)",
                 color: active ? "#fff" : "var(--text-2)",
@@ -63,6 +65,13 @@ export default function Shell({ children }: { children: ReactNode }) {
               }}>
                 <Icon size={16} style={{ flexShrink: 0, opacity: .9 }} />
                 {label}
+                {/* live run indicator, visible from every page (D-031) */}
+                {href === "/" && run.isRunning && (
+                  <span className="pulse" style={{
+                    marginLeft: "auto", width: 7, height: 7, borderRadius: "50%",
+                    background: active ? "#fff" : "var(--blue)",
+                  }} />
+                )}
               </Link>
             );
           })}

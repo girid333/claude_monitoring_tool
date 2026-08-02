@@ -83,6 +83,17 @@ class CoreBasisSection(Section):
     section_id = "core_basis"
     title = "Core BASIS"
 
+    def tcode_list(self) -> list[str]:
+        """D-031: the T-codes this sweep will visit, in order — so the UI can
+        render the full checklist up-front (all pending) and light each one up
+        as v1 reports progress, instead of showing an opaque spinner."""
+        try:
+            from .core_basis_wrap import load_v1_orchestrator
+            mod = load_v1_orchestrator(self._resolve_v1_path())
+            return [t["tcode"] for t in mod.MONITORED_TCODES]
+        except Exception:  # noqa: BLE001
+            return []
+
     def __init__(self, v1_path: str | Path | None = None,
                  registry_path: str | Path = "systems.json"):
         # D-028: v1's code is found via a resolution order, because the
@@ -114,7 +125,17 @@ class CoreBasisSection(Section):
             "v1 engine not found — looked for backend/orchestrator.py under: "
             + ", ".join(str(c) for c in candidates))
 
-    async def run(self, engine: ReplayEngine, run_id: str, sid: str) -> SectionResult:
+    async def run(self, engine: ReplayEngine, run_id: str, sid: str,
+                   on_status=None) -> SectionResult:
+        """D-031: `on_status` is an optional SYNC callable receiving v1's own
+        progress strings ("Capturing screenshot for SM50...", warnings, etc.).
+
+        It must be sync: v1's `sap_automator.take_screenshots()` invokes the
+        callback directly WITHOUT awaiting it (orchestrator.update_status
+        handles coroutines, but take_screenshots does not), so an async
+        callback would produce an un-awaited coroutine and silently drop the
+        event. main.py passes a sync shim that schedules the SSE emit.
+        """
         result = SectionResult(self.section_id, self.title, ok=True)
 
         from .core_basis_wrap import ResilientRfcClient, build_v1_config, load_v1_orchestrator
@@ -139,7 +160,7 @@ class CoreBasisSection(Section):
 
         config = build_v1_config(sys_entry, creds)
         ResilientRfcClient.reset_log()
-        orch = orchestrator_mod.ReportOrchestrator(config)
+        orch = orchestrator_mod.ReportOrchestrator(config, status_callback=on_status)
 
         try:
             v1_results = await orch.generate_report()

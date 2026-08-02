@@ -1,20 +1,23 @@
 "use client";
 
-/* Landscape view — implements design/mockup.html against the real API.
-   Island subscribes to /api/events/{run_id} (SSE) per D-016.
-   Visual details (spacing, badges, sections) follow the mockup exactly —
-   extend there first, then port here. */
+/* Landscape — THE place to start a run (D-031).
 
-import { useEffect, useMemo, useState } from "react";
+   Runs are launched only from here (the Runs page is history-only) so there
+   is one obvious execution path. Live progress — per-T-code checklist, phase
+   text, errors — renders here and, because run state lives in RunContext at
+   the layout level, survives navigating to any other tab and back. */
+
+import { useEffect, useState } from "react";
 import { apiBase } from "./lib/api";
+import { useRun } from "./components/RunContext";
 
 const API = apiBase();
 
 type SystemRow = {
   sid: string; system_name?: string; release_tag: string; auth: string; tags: string[];
   last_run: { ok: boolean; flow_id: string; checks: { ok: boolean; severity: string }[] } | null;
+  credentials?: { sap_credentials: boolean };
 };
-type IslandEvent = { type: string; sid?: string; flow_id?: string; ok?: boolean; error?: string };
 
 function healthOf(s: SystemRow): "ok" | "warn" | "crit" {
   if (!s.last_run) return "ok";
@@ -29,196 +32,156 @@ const DOT = { ok: "var(--green)", warn: "var(--orange)", crit: "var(--red)" };
 export default function Landscape() {
   const [systems, setSystems] = useState<SystemRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [runId, setRunId] = useState<string | null>(null);
-  const [islandEvents, setIslandEvents] = useState<IslandEvent[]>([]);
-  const [includeCoreBasis, setIncludeCoreBasis] = useState(true);
-  const [includeFlows, setIncludeFlows] = useState(true);
-  // D-028: run failures must be VISIBLE — system_error events land here and
-  // persist after the run ends (the island itself disappears on run_done).
-  const [runErrors, setRunErrors] = useState<string[]>([]);
-  const [lastRunDone, setLastRunDone] = useState(false);
-  const [statusLine, setStatusLine] = useState("");
+  const [coreBasis, setCoreBasis] = useState(true);
+  const [flows, setFlows] = useState(false);
+  const [loadError, setLoadError] = useState("");
+
+  const run = useRun();
 
   useEffect(() => {
-    fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems).catch(() => {});
-  }, [runId]);
+    fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems)
+      .catch(err => setLoadError(`Could not reach the backend at ${API}: ${err instanceof Error ? err.message : String(err)}`));
+  }, [run.done]);
 
-  useEffect(() => {
-    if (!runId) return;
-    const es = new EventSource(`${API}/api/events/${runId}`);
-    es.onmessage = e => {
-      const ev: IslandEvent = JSON.parse(e.data);
-      setIslandEvents(prev => [...prev, ev]);
-      // D-029: live phase text — login/probe/Core BASIS take minutes with no
-      // chip events, which read as "nothing is happening" without this.
-      if (ev.type === "system_start") setStatusLine(`Processing ${ev.sid}: logging in…`);
-      if (ev.type === "probe") setStatusLine(`${ev.sid}: logged in, probing capabilities…`);
-      if (ev.type === "flow_start") setStatusLine(`${ev.sid}: running flow ${ev.flow_id}…`);
-      if (ev.type === "core_basis_start") setStatusLine(`${ev.sid}: Core BASIS sweep running (23 T-codes — takes several minutes)…`);
-      if (ev.type === "core_basis_done") setStatusLine(`${ev.sid}: Core BASIS done`);
-      if (ev.type === "report_start") setStatusLine(`${ev.sid}: generating Word/PDF report…`);
-      if (ev.type === "system_error") {
-        setRunErrors(prev => [...prev, `${ev.sid}: ${ev.error ?? "unknown error"}`]);
-      }
-      if (ev.type === "run_error") {
-        setRunErrors(prev => [...prev, `Run failed: ${ev.error ?? "unknown error"}`]);
-      }
-      if (ev.type === "run_done") { es.close(); setRunId(null); setLastRunDone(true); setStatusLine(""); }
-    };
-    es.onerror = () => {
-      if (es.readyState !== EventSource.CLOSED) return;  // auto-reconnecting
-      setRunId(null); setLastRunDone(true); setStatusLine("");
-      setRunErrors(prev => [...prev, "Lost connection to the run's event stream — check the Runs page and backend logs."]);
-    };
-    return () => es.close();
-  }, [runId]);
+  const canRun = selected.size > 0 && (coreBasis || flows) && !run.isRunning;
 
-  const startRun = async () => {
-    setIslandEvents([]);
-    setRunErrors([]);
-    setLastRunDone(false);
-    setStatusLine("Starting run…");
-    try {
-      const res = await fetch(`${API}/api/run`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sids: [...selected],
-          flows: includeFlows ? ["flows/sm37_cancelled_jobs.json"] : [],
-          include_core_basis: includeCoreBasis,   // D-026: was hardcoded false
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      const body = await res.json();
-      if (!body.run_id) throw new Error(`backend returned no run_id: ${JSON.stringify(body)}`);
-      setRunId(body.run_id);
-    } catch (err) {
-      // D-029: a failed POST used to vanish into an unhandled rejection —
-      // the exact "clicked Run sweep, nothing happened" failure mode.
-      setStatusLine("");
-      setLastRunDone(true);
-      setRunErrors([`Could not start the run via ${API}: ${err instanceof Error ? err.message : String(err)}`]);
-    }
-  };
-
-  const islandChips = useMemo(
-    () => islandEvents.filter(e =>
-      ["flow_done", "flow_start", "core_basis_start", "core_basis_done",
-       "system_error"].includes(e.type)),
-    [islandEvents]);
+  const doneCount = run.tcodes.filter(t => ["done", "warn"].includes(run.tcodeStatus[t])).length;
+  const pct = run.tcodes.length ? Math.round((doneCount / run.tcodes.length) * 100) : 0;
 
   return (
-    <div style={{ maxWidth: 1100 }}>
-      {/* Dynamic Island */}
-      {runId && (
-        <div style={{ display: "flex", justifyContent: "center", marginBottom: 30 }}>
-          <div className="panel" style={{
-            borderRadius: 28, padding: "12px 20px", display: "flex",
-            alignItems: "center", gap: 16, maxWidth: 640, width: "100%",
-            background: "rgba(12,12,14,.9)",
-          }}>
-            <span style={{
-              width: 9, height: 9, borderRadius: "50%", background: "var(--green)",
-            }} />
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>Bulk run</div>
-              <div style={{ fontSize: 11, color: "var(--text-3)", whiteSpace: "nowrap" }}>
-                {statusLine || `Run ${runId}`}
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 6, flex: 1, justifyContent: "flex-end", flexWrap: "wrap" }}>
-              {islandChips.map((e, i) => {
-                const isStart = e.type === "flow_start" || e.type === "core_basis_start";
-                const isError = e.type === "system_error";
-                const label = isError ? e.sid
-                  : e.type.startsWith("core_basis")
-                    ? `${e.sid} BASIS` : e.flow_id?.split("_")[0]?.toUpperCase();
-                return (
-                  <span key={i} style={{
-                    fontSize: 10.5, fontWeight: 600, padding: "3.5px 9px",
-                    borderRadius: 999, border: "1px solid var(--hairline)",
-                    color: isError ? "var(--red)"
-                      : isStart ? "var(--blue)" : e.ok ? "var(--green)" : "var(--orange)",
-                  }}>
-                    {label}{isError ? " ✕" : isStart ? " …" : (e.ok ? " ✓" : " !")}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <h1 style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.022em" }}>Landscape</h1>
-
-      {/* D-028: post-run outcome stays visible after the island closes */}
-      {lastRunDone && runErrors.length > 0 && (
-        <div style={{
-          margin: "10px 0 0", padding: "10px 14px", borderRadius: 10,
-          border: "1px solid var(--red)", color: "var(--red)", fontSize: 12.5,
-        }}>
-          <b>Run finished with errors:</b>
-          {runErrors.map((e, i) => <div key={i} style={{ marginTop: 4 }}>{e}</div>)}
-        </div>
-      )}
-      {lastRunDone && runErrors.length === 0 && (
-        <div style={{ margin: "10px 0 0", color: "var(--green)", fontSize: 12.5 }}>
-          ✓ Run finished — see Runs and Reports pages for results.
-        </div>
-      )}
-      <p style={{ fontSize: 13.5, color: "var(--text-2)", margin: "4px 0 26px" }}>
+    <div style={{ maxWidth: 1100 }} className="page-enter">
+      <h1 className="ltitle">Landscape</h1>
+      <p className="lsub">
         <b style={{ color: "var(--text)" }}>{systems.length} systems</b>
-        {selected.size > 0 && <> · {selected.size} selected
-          <label style={{ marginLeft: 14, fontSize: 12, color: "var(--text-2)", cursor: "pointer" }}>
-            <input type="checkbox" checked={includeCoreBasis}
-                   onChange={e => setIncludeCoreBasis(e.target.checked)}
-                   style={{ marginRight: 5, verticalAlign: -1 }} />
-            Core BASIS
-          </label>
-          <label style={{ marginLeft: 10, fontSize: 12, color: "var(--text-2)", cursor: "pointer" }}>
-            <input type="checkbox" checked={includeFlows}
-                   onChange={e => setIncludeFlows(e.target.checked)}
-                   style={{ marginRight: 5, verticalAlign: -1 }} />
-            Functional flows
-          </label>
-          <button onClick={startRun} disabled={!!runId || (!includeCoreBasis && !includeFlows)} style={{
-            marginLeft: 12, background: "var(--blue)", color: "#fff", border: 0,
-            borderRadius: 999, padding: "5px 14px", fontSize: 12.5,
-            fontWeight: 600, cursor: "pointer",
-            opacity: (runId || (!includeCoreBasis && !includeFlows)) ? 0.5 : 1,
-          }}>Run sweep</button></>}
+        {" · select one or more, choose what to run, then Execute"}
       </p>
 
-      <div style={{
-        display: "grid", gap: 16,
-        gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))",
-      }}>
-        {systems.map(s => {
+      {loadError && (
+        <div style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: 10,
+                       border: "1px solid var(--red)", color: "var(--red)", fontSize: 12.5 }}>
+          {loadError}
+        </div>
+      )}
+
+      {/* ── Execution bar ── */}
+      <div className="panel" style={{ padding: "14px 18px", marginBottom: 22, borderRadius: 14,
+                                       display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>
+          {selected.size === 0 ? "Select a system below" : `${selected.size} selected`}
+        </div>
+        <label style={{ fontSize: 12.5, color: "var(--text-2)", cursor: "pointer" }}>
+          <input type="checkbox" checked={coreBasis} onChange={e => setCoreBasis(e.target.checked)}
+                 style={{ marginRight: 6, verticalAlign: -1 }} />
+          Core BASIS sweep <span style={{ color: "var(--text-3)" }}>(23 T-codes + SSH + URL checks → Word/PDF report)</span>
+        </label>
+        <label style={{ fontSize: 12.5, color: "var(--text-2)", cursor: "pointer" }}>
+          <input type="checkbox" checked={flows} onChange={e => setFlows(e.target.checked)}
+                 style={{ marginRight: 6, verticalAlign: -1 }} />
+          Functional flows
+        </label>
+        <button className="btn" disabled={!canRun}
+                onClick={() => run.startRun([...selected], { coreBasis, flows })}
+                style={{ marginLeft: "auto" }}>
+          {run.isRunning ? "Running…" : "Execute"}
+        </button>
+      </div>
+
+      {/* ── Live progress (survives navigation via RunContext) ── */}
+      {(run.isRunning || run.done) && (run.tcodes.length > 0 || run.phase || run.errors.length > 0) && (
+        <div className="panel island" style={{ padding: "16px 18px", marginBottom: 22, borderRadius: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <span className={run.isRunning ? "pulse" : ""} style={{
+              width: 9, height: 9, borderRadius: "50%",
+              background: run.errors.length ? "var(--red)" : run.isRunning ? "var(--blue)" : "var(--green)",
+            }} />
+            <div style={{ fontSize: 13, fontWeight: 600 }}>
+              {run.isRunning ? "Run in progress" : run.errors.length ? "Run finished with errors" : "Run complete"}
+            </div>
+            {run.tcodes.length > 0 && (
+              <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
+                {doneCount}/{run.tcodes.length} T-codes
+              </div>
+            )}
+            {run.done && (
+              <button className="btn secondary" style={{ marginLeft: "auto", fontSize: 11.5, padding: "4px 10px" }}
+                      onClick={run.dismiss}>Dismiss</button>
+            )}
+          </div>
+
+          {run.phase && (
+            <div style={{ fontSize: 12.5, color: "var(--text-2)", marginBottom: 10 }}>{run.phase}</div>
+          )}
+
+          {run.tcodes.length > 0 && (
+            <>
+              <div className="pbar" style={{ marginBottom: 12 }}><span style={{ width: `${pct}%` }} /></div>
+              <div className="tgrid">
+                {run.tcodes.map(t => {
+                  const st = run.tcodeStatus[t] ?? "pending";
+                  return (
+                    <div key={t} className={`tchip ${st === "pending" ? "" : st}`}>
+                      <span className="tdot" />{t}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {run.errors.length > 0 && (
+            <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 10,
+                           border: "1px solid var(--red)", color: "var(--red)", fontSize: 12.5 }}>
+              {run.errors.map((e, i) => <div key={i} style={{ marginTop: i ? 4 : 0 }}>{e}</div>)}
+            </div>
+          )}
+
+          {run.done && !run.errors.length && (
+            <div style={{ marginTop: 12, fontSize: 12.5, color: "var(--green)" }}>
+              ✓ Finished — Word and PDF reports are on the <a href="/reports" style={{ color: "var(--blue)" }}>Reports</a> page.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── System cards (tvOS focus behaviour) ── */}
+      <div style={{ display: "grid", gap: 16, gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))" }}>
+        {systems.length === 0 && !loadError && (
+          <div className="rsub">No systems yet — add one on the Systems page.</div>
+        )}
+        {systems.map((s, i) => {
           const h = healthOf(s);
           const on = selected.has(s.sid);
+          const active = run.sid === s.sid && run.isRunning;
           return (
-            <div key={s.sid} className="panel card" tabIndex={0}
+            <div key={s.sid} className="panel card rise" tabIndex={0}
               onClick={() => setSelected(prev => {
                 const n = new Set(prev); n.has(s.sid) ? n.delete(s.sid) : n.add(s.sid); return n;
               })}
-              style={{ padding: "18px 18px 16px", outline: on ? "2px solid var(--blue)" : "none" }}>
+              onKeyDown={e => { if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setSelected(prev => { const n = new Set(prev); n.has(s.sid) ? n.delete(s.sid) : n.add(s.sid); return n; });
+              }}}
+              style={{ padding: "18px 18px 16px",
+                        outline: on ? "2px solid var(--blue)" : "none",
+                        ["--i" as string]: i }}>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <div>
+                <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 22, fontWeight: 700 }}>{s.sid}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2 }}>
+                  <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 2,
+                                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {s.system_name ? `${s.system_name} · ` : ""}{s.release_tag} · {s.auth.toUpperCase()}
                   </div>
                 </div>
-                <span style={{
-                  width: 11, height: 11, borderRadius: "50%", marginTop: 5,
-                  background: DOT[h], boxShadow: `0 0 10px ${DOT[h]}`,
+                <span className={active ? "pulse" : ""} style={{
+                  width: 11, height: 11, borderRadius: "50%", marginTop: 5, flexShrink: 0,
+                  background: active ? "var(--blue)" : DOT[h],
+                  boxShadow: `0 0 10px ${active ? "var(--blue)" : DOT[h]}`,
                 }} />
               </div>
-              <div style={{
-                marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--hairline)",
-                fontSize: 12, color: "var(--text-2)",
-              }}>
-                {s.last_run
-                  ? `${s.last_run.flow_id} · ${s.last_run.ok ? "clean" : "anomalies"}`
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--hairline)",
+                             fontSize: 12, color: "var(--text-2)" }}>
+                {active ? "running now…"
+                  : s.last_run ? `${s.last_run.flow_id} · ${s.last_run.ok ? "clean" : "anomalies"}`
                   : "no runs yet"}
               </div>
             </div>

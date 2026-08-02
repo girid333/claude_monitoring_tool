@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -246,6 +247,14 @@ class RecorderStopRequest(BaseModel):
 
 class RecorderCancelRequest(BaseModel):
     recording_id: str
+
+
+def _parse_tcode(msg: str) -> str | None:
+    """D-031: pull the T-code out of v1's own progress strings (e.g.
+    'Capturing screenshot for SM50...', 'Extracting data for ST22 - Dumps').
+    Returns None for general messages like 'Logging into SAP WebGUI...'."""
+    m = re.search(r"(?:for|Running|Extracting data for)\s+([A-Z][A-Z0-9]{1,7})\b", msg)
+    return m.group(1) if m else None
 
 
 async def emit(run_id: str, event: dict) -> None:
@@ -534,9 +543,25 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                         ok=all(fr.ok for fr in flow_results), flow_results=flow_results))
 
                 if req.include_core_basis:
-                    await emit(run_id, {"type": "core_basis_start", "sid": sid})
                     section = CoreBasisSection(registry_path=SYSTEMS_PATH)  # D-028: honor env override
-                    sr = await section.run(engine, run_id, sid)
+                    # D-031: send the full T-code checklist up-front so the UI
+                    # can render every step as "pending" before work begins.
+                    await emit(run_id, {"type": "core_basis_start", "sid": sid,
+                                        "tcodes": section.tcode_list()})
+
+                    loop = asyncio.get_running_loop()
+
+                    def on_status(msg: str, _sid=sid) -> None:
+                        # SYNC by contract — v1's take_screenshots() calls this
+                        # without awaiting (see CoreBasisSection.run docstring).
+                        # Schedule the emit instead of awaiting it here.
+                        loop.create_task(emit(run_id, {
+                            "type": "core_basis_progress", "sid": _sid,
+                            "message": msg, "tcode": _parse_tcode(msg),
+                            "level": "warn" if msg.lower().startswith("warning") else "info",
+                        }))
+
+                    sr = await section.run(engine, run_id, sid, on_status=on_status)
                     anomaly_count = len((sr.v1_results or {}).get("anomalies", []))
                     store.save_core_basis(run_id, sid, sr.ok, anomaly_count,
                                            sr.notes, sr.v1_results or {})
