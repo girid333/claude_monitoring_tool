@@ -24,10 +24,17 @@ from engine.core_basis_wrap import ResilientRfcClient, build_v1_config, load_v1_
 from engine.sections import CoreBasisSection  # noqa: E402
 
 
-class _FakeSysEntry:
-    sid = "Q4H"
-    webgui_url = "https://q4h.example.internal:44300/sap/bc/gui/sap/its/webgui"
-    client = "100"
+from engine.registry import SystemEntry  # noqa: E402
+
+
+def _FakeSysEntry() -> SystemEntry:
+    # D-028: a REAL SystemEntry (not a hand-rolled stub) so this smoke test
+    # breaks loudly whenever the registry schema and build_v1_config drift
+    # apart — exactly the failure mode a stale stub silently hides.
+    return SystemEntry(
+        sid="Q4H",
+        webgui_url="https://q4h.example.internal:44300/sap/bc/gui/sap/its/webgui",
+        client="100")
 
 
 class _FakeRegistry:

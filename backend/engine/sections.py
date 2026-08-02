@@ -83,16 +83,36 @@ class CoreBasisSection(Section):
     section_id = "core_basis"
     title = "Core BASIS"
 
-    def __init__(self, v1_path: str | Path = "../../sap_monitoring",
+    def __init__(self, v1_path: str | Path | None = None,
                  registry_path: str | Path = "systems.json"):
-        # Verified 2026-08-01 against the real Antigravity layout: main.py
-        # runs `uvicorn main:app` from claude_monitoring_tool/backend/, and
-        # sap_monitoring is a sibling of claude_monitoring_tool, i.e. two
-        # levels up from backend/, not one. The scaffold's original
-        # "../sap_monitoring" default resolved to a nonexistent
-        # claude_monitoring_tool/sap_monitoring — fixed here.
-        self.v1_path = Path(v1_path)
+        # D-028: v1's code is found via a resolution order, because the
+        # deployment layouts genuinely differ:
+        #   1. V1_PATH env var — explicit override (e.g. volume-mounted v1)
+        #   2. ../../sap_monitoring relative to CWD — the dev layout
+        #      (sap_monitoring is a sibling of claude_monitoring_tool;
+        #      uvicorn runs from backend/, so two levels up) — preferred
+        #      when present so a locally-updated v1 wins over the snapshot
+        #   3. backend/v1_core — verbatim vendored copy shipped in the
+        #      Docker image (the container has no sap_monitoring at all;
+        #      without this, Core BASIS could never run containerized)
+        self.v1_path = Path(v1_path) if v1_path else None
         self.registry_path = registry_path
+
+    def _resolve_v1_path(self) -> Path:
+        import os
+        candidates = []
+        if self.v1_path:
+            candidates.append(self.v1_path)
+        if os.environ.get("V1_PATH"):
+            candidates.append(Path(os.environ["V1_PATH"]))
+        candidates.append(Path("../../sap_monitoring"))
+        candidates.append(Path(__file__).resolve().parent.parent / "v1_core")
+        for c in candidates:
+            if (Path(c) / "backend" / "orchestrator.py").is_file():
+                return Path(c)
+        raise FileNotFoundError(
+            "v1 engine not found — looked for backend/orchestrator.py under: "
+            + ", ".join(str(c) for c in candidates))
 
     async def run(self, engine: ReplayEngine, run_id: str, sid: str) -> SectionResult:
         result = SectionResult(self.section_id, self.title, ok=True)
@@ -110,7 +130,7 @@ class CoreBasisSection(Section):
             return result
 
         try:
-            orchestrator_mod = load_v1_orchestrator(self.v1_path)
+            orchestrator_mod = load_v1_orchestrator(self._resolve_v1_path())
         except Exception as exc:
             result.ok = False
             result.notes.append(

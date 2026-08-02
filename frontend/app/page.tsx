@@ -14,7 +14,7 @@ type SystemRow = {
   sid: string; system_name?: string; release_tag: string; auth: string; tags: string[];
   last_run: { ok: boolean; flow_id: string; checks: { ok: boolean; severity: string }[] } | null;
 };
-type IslandEvent = { type: string; sid?: string; flow_id?: string; ok?: boolean };
+type IslandEvent = { type: string; sid?: string; flow_id?: string; ok?: boolean; error?: string };
 
 function healthOf(s: SystemRow): "ok" | "warn" | "crit" {
   if (!s.last_run) return "ok";
@@ -33,6 +33,10 @@ export default function Landscape() {
   const [islandEvents, setIslandEvents] = useState<IslandEvent[]>([]);
   const [includeCoreBasis, setIncludeCoreBasis] = useState(true);
   const [includeFlows, setIncludeFlows] = useState(true);
+  // D-028: run failures must be VISIBLE — system_error events land here and
+  // persist after the run ends (the island itself disappears on run_done).
+  const [runErrors, setRunErrors] = useState<string[]>([]);
+  const [lastRunDone, setLastRunDone] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems).catch(() => {});
@@ -44,7 +48,13 @@ export default function Landscape() {
     es.onmessage = e => {
       const ev: IslandEvent = JSON.parse(e.data);
       setIslandEvents(prev => [...prev, ev]);
-      if (ev.type === "run_done") { es.close(); setRunId(null); }
+      if (ev.type === "system_error") {
+        setRunErrors(prev => [...prev, `${ev.sid}: ${ev.error ?? "unknown error"}`]);
+      }
+      if (ev.type === "run_error") {
+        setRunErrors(prev => [...prev, `Run failed: ${ev.error ?? "unknown error"}`]);
+      }
+      if (ev.type === "run_done") { es.close(); setRunId(null); setLastRunDone(true); }
     };
     return () => es.close();
   }, [runId]);
@@ -59,12 +69,15 @@ export default function Landscape() {
       }),
     });
     setIslandEvents([]);
+    setRunErrors([]);
+    setLastRunDone(false);
     setRunId((await res.json()).run_id);
   };
 
   const islandChips = useMemo(
     () => islandEvents.filter(e =>
-      ["flow_done", "flow_start", "core_basis_start", "core_basis_done"].includes(e.type)),
+      ["flow_done", "flow_start", "core_basis_start", "core_basis_done",
+       "system_error"].includes(e.type)),
     [islandEvents]);
 
   return (
@@ -87,15 +100,18 @@ export default function Landscape() {
             <div style={{ display: "flex", gap: 6, flex: 1, justifyContent: "flex-end", flexWrap: "wrap" }}>
               {islandChips.map((e, i) => {
                 const isStart = e.type === "flow_start" || e.type === "core_basis_start";
-                const label = e.type.startsWith("core_basis")
-                  ? `${e.sid} BASIS` : e.flow_id?.split("_")[0]?.toUpperCase();
+                const isError = e.type === "system_error";
+                const label = isError ? e.sid
+                  : e.type.startsWith("core_basis")
+                    ? `${e.sid} BASIS` : e.flow_id?.split("_")[0]?.toUpperCase();
                 return (
                   <span key={i} style={{
                     fontSize: 10.5, fontWeight: 600, padding: "3.5px 9px",
                     borderRadius: 999, border: "1px solid var(--hairline)",
-                    color: isStart ? "var(--blue)" : e.ok ? "var(--green)" : "var(--orange)",
+                    color: isError ? "var(--red)"
+                      : isStart ? "var(--blue)" : e.ok ? "var(--green)" : "var(--orange)",
                   }}>
-                    {label}{isStart ? " …" : (e.ok ? " ✓" : " !")}
+                    {label}{isError ? " ✕" : isStart ? " …" : (e.ok ? " ✓" : " !")}
                   </span>
                 );
               })}
@@ -105,6 +121,22 @@ export default function Landscape() {
       )}
 
       <h1 style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.022em" }}>Landscape</h1>
+
+      {/* D-028: post-run outcome stays visible after the island closes */}
+      {lastRunDone && runErrors.length > 0 && (
+        <div style={{
+          margin: "10px 0 0", padding: "10px 14px", borderRadius: 10,
+          border: "1px solid var(--red)", color: "var(--red)", fontSize: 12.5,
+        }}>
+          <b>Run finished with errors:</b>
+          {runErrors.map((e, i) => <div key={i} style={{ marginTop: 4 }}>{e}</div>)}
+        </div>
+      )}
+      {lastRunDone && runErrors.length === 0 && (
+        <div style={{ margin: "10px 0 0", color: "var(--green)", fontSize: 12.5 }}>
+          ✓ Run finished — see Runs and Reports pages for results.
+        </div>
+      )}
       <p style={{ fontSize: 13.5, color: "var(--text-2)", margin: "4px 0 26px" }}>
         <b style={{ color: "var(--text)" }}>{systems.length} systems</b>
         {selected.size > 0 && <> · {selected.size} selected

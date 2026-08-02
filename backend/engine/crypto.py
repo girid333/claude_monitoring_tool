@@ -1,10 +1,7 @@
-"""D-023: encryption-at-rest for the SSH credentials now stored in the
-registry (systems.json).
-
-This resolves OQ-8 for the one credential class that moved into the
-registry — per-server/per-DB-host SSH passwords. It does NOT change SAP
-WebGUI login credentials, which stay env-var-only (D-018, untouched by
-D-023). See registry.py's module docstring for the exact dividing line.
+"""D-023/D-025: encryption-at-rest for credentials stored in the registry
+(systems.json) — per-server/per-DB-host SSH passwords (D-023) and SAP WebGUI
+login passwords (D-025). Env vars remain a supported fallback for both
+classes; see registry.py's RegistryCredentialProvider.
 
 REGISTRY_ENCRYPTION_KEY must be a Fernet key: a 44-character urlsafe-base64
 string, e.g. from `python -c "from cryptography.fernet import Fernet;

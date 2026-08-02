@@ -412,7 +412,7 @@ async def recorder_start(req: RecorderStartRequest) -> dict:
     _require_display()
     from engine.recorder_service import start_recording
     try:
-        session = await start_recording(req.sid)
+        session = await start_recording(req.sid, registry_path=SYSTEMS_PATH)  # D-028
     except KeyError:
         raise HTTPException(404, f"unknown sid {req.sid!r} in systems.json")
     except Exception as exc:  # noqa: BLE001
@@ -458,7 +458,23 @@ async def recorder_cancel(req: RecorderCancelRequest) -> dict:
 
 async def _execute_run(run_id: str, req: RunRequest) -> None:
     """Sequential per system. Emits: system_start, flow_start, step,
-    flow_done, system_done, run_done."""
+    flow_done, system_done, run_done.
+
+    D-028 robustness contract: `run_done` is ALWAYS emitted (finally),
+    whatever fails — an unknown SID, a browser-launch failure, anything.
+    Before this, a pre-loop failure (e.g. Playwright browsers not
+    installed) or an unknown SID killed the background task silently and
+    the frontend island spun forever with no error shown.
+    """
+    try:
+        await _execute_run_inner(run_id, req)
+    except Exception as exc:  # noqa: BLE001
+        await emit(run_id, {"type": "run_error", "error": repr(exc)})
+    finally:
+        await emit(run_id, {"type": "run_done"})
+
+
+async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
     from playwright.async_api import async_playwright
 
     from engine.engine import ReplayEngine
@@ -475,11 +491,12 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         for sid in req.sids:
-            sys_entry = reg.get(sid)
             await emit(run_id, {"type": "system_start", "sid": sid})
-            ctx = await browser.new_context()
-            page = await ctx.new_page()
+            ctx = None
             try:
+                sys_entry = reg.get(sid)   # D-028: unknown SID -> system_error, not a dead task
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
                 login = BasicLoginPlugin(  # TODO: plugin lookup by sys_entry.auth
                     SystemTarget(sid, sys_entry.webgui_url, sys_entry.client), creds)
                 await login.login(page)
@@ -510,7 +527,7 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
 
                 if req.include_core_basis:
                     await emit(run_id, {"type": "core_basis_start", "sid": sid})
-                    section = CoreBasisSection()
+                    section = CoreBasisSection(registry_path=SYSTEMS_PATH)  # D-028: honor env override
                     sr = await section.run(engine, run_id, sid)
                     anomaly_count = len((sr.v1_results or {}).get("anomalies", []))
                     store.save_core_basis(run_id, sid, sr.ok, anomaly_count,
@@ -530,7 +547,7 @@ async def _execute_run(run_id: str, req: RunRequest) -> None:
                 await emit(run_id, {"type": "system_error", "sid": sid,
                                     "error": repr(exc)})
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
                 await emit(run_id, {"type": "system_done", "sid": sid})
         await browser.close()
-    await emit(run_id, {"type": "run_done"})

@@ -120,8 +120,9 @@ monitoring, Functional Sanity flows) is unaffected either way —
 | `CORS_ORIGINS` | backend | `http://localhost:3000` | comma-separated allowed origins |
 | `HEADLESS_DEPLOYMENT` | backend | `1` (set in image) | disables `/api/recorder/start` with a clear 501 |
 | `PORT` | backend | `8000` | uvicorn bind port (ECS/Fargate/Cloud Run inject this) |
-| `SAP_<SID>_USER` / `_PASSWORD` | backend | — | SAP WebGUI login credentials (D-018, env-only, never stored) |
-| `REGISTRY_ENCRYPTION_KEY` | backend | — | Fernet key encrypting SSH credentials stored in `systems.json` (D-023) — required only once you add an SSH credential via the Systems page |
+| `SAP_<SID>_USER` / `_PASSWORD` | backend | — | SAP WebGUI login credentials — FALLBACK only since D-025; enter them in the Systems page instead (encrypted at rest) |
+| `REGISTRY_ENCRYPTION_KEY` | backend | — | Fernet key encrypting SSH (D-023) and SAP (D-025) credentials stored in `systems.json` — required once you save any credential via the Systems page |
+| `V1_PATH` | backend | auto | override where the v1 engine lives. Resolution order (D-028): `V1_PATH` → `../../sap_monitoring` (dev layout) → `v1_core/` vendored copy shipped in the image. Containers need no configuration — the vendored copy just works. |
 | `NEXT_PUBLIC_API` | frontend | `http://localhost:8000` | **build arg**, backend URL baked into the client bundle |
 
 Note: `SAP_<SID>_SSH_USER`/`_SSH_PASSWORD`/`_SSH_KEY_PATH` env vars from
