@@ -64,6 +64,7 @@ class Act(str, Enum):
     SELECT = "select"             # row / node / tab selection
     VKEY = "vkey"                 # virtual key (8=F8, 0=Enter, 3=F3, ...)
     WAIT_READY = "wait_ready"     # explicit sync barrier (see sync.py)
+    SCROLL = "scroll"             # D-037: restore a scroll position before capturing
     CAPTURE = "capture"           # screenshot and/or structured read
     CHECK = "check"               # assertion on last capture
 

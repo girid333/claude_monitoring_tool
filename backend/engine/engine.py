@@ -119,6 +119,31 @@ class ReplayEngine:
             await self.resolver.send_vkey(int(value), wnd)
             return StepResult(index=i, act=step.act, ok=True)
 
+        if step.act == Act.SCROLL:
+            # D-037: restore the scroll position the user was looking at, so
+            # a following CAPTURE shows what they actually saw. Without this
+            # every screenshot after a scroll replayed from the top.
+            pos = step.value if isinstance(step.value, dict) else {}
+            top, left = int(pos.get("top", 0)), int(pos.get("left", 0))
+            if step.target is not None and step.target.dom is not None:
+                try:
+                    res = await self.resolver.resolve(step.target)
+                    await res.handle.evaluate(
+                        "(el, p) => { el.scrollTop = p.top; el.scrollLeft = p.left; }",
+                        {"top": top, "left": left})
+                    detail = f"container -> {top},{left}"
+                except Exception:  # noqa: BLE001 — fall back to the document
+                    await self.page.evaluate("p => window.scrollTo(p.left, p.top)",
+                                              {"top": top, "left": left})
+                    detail = f"document (container unresolved) -> {top},{left}"
+            else:
+                await self.page.evaluate("p => window.scrollTo(p.left, p.top)",
+                                          {"top": top, "left": left})
+                detail = f"document -> {top},{left}"
+            await self.page.wait_for_timeout(250)   # let the grid repaint
+            return StepResult(index=i, act=step.act, ok=True,
+                              resolver=self.resolver.name, detail=detail)
+
         if step.act == Act.CAPTURE:
             return await self._capture(i, step, last_capture)
 
@@ -134,7 +159,11 @@ class ReplayEngine:
         if "screenshot" in modes:
             self.artifact_dir.mkdir(parents=True, exist_ok=True)
             path = self.artifact_dir / f"{self.run_id}_{self.sid}_step{i}.png"
-            await self.page.screenshot(path=str(path), full_page=True)
+            # D-037: viewport, NOT full_page. SAP WebGUI is a fixed-height app
+            # whose grids scroll an inner container, so a full-page shot both
+            # ignores the scroll position and renders the same image every
+            # time — the user asked for "this view", so capture this view.
+            await self.page.screenshot(path=str(path), full_page=False)
             sr.screenshot_path = str(path)
         if "table" in modes and step.target is not None:
             res = await self.resolver.resolve(step.target)

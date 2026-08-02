@@ -169,6 +169,35 @@ _INJECT_JS = r"""
   document.addEventListener("keydown", ev => {
     if (ev.key === "Enter" || /^F\d{1,2}$/.test(ev.key)) emit("key", ev, ev.target);
   }, true);
+
+  // D-037: record SCROLL POSITION.
+  // Without this, scrolling during recording was invisible to the flow, so
+  // every screenshot the user captured after scrolling replayed from the
+  // top of the page — all captures came out identical. SAP's ALV grids
+  // scroll an inner container, not the document, so we record which element
+  // scrolled and to what offset.
+  let scrollTimer = null;
+  document.addEventListener("scroll", ev => {
+    const el = ev.target;
+    clearTimeout(scrollTimer);
+    // Debounce: a single flick fires dozens of events; only the resting
+    // position matters for replay.
+    scrollTimer = setTimeout(() => {
+      try {
+        const isDoc = (el === document) || (el === document.documentElement) || (el === window);
+        const node = isDoc ? document.documentElement : el;
+        const top = isDoc ? (window.scrollY || node.scrollTop || 0) : node.scrollTop;
+        const left = isDoc ? (window.scrollX || node.scrollLeft || 0) : node.scrollLeft;
+        if (!top && !left) return;              // back at origin: nothing to restore
+        window.__rec_emit({
+          kind: "scroll",
+          value: { top: Math.round(top), left: Math.round(left), doc: isDoc },
+          dom: isDoc ? null : domMeta(node),
+          sid: null, ts: Date.now(),
+        });
+      } catch (e) {}
+    }, 260);
+  }, true);
 })();
 """
 
@@ -231,6 +260,10 @@ class Recorder:
                 label = f"T-code {s.value}"
             elif s.act == Act.CAPTURE:
                 label = "screenshot"
+            elif s.act == Act.SCROLL:
+                pos = s.value if isinstance(s.value, dict) else {}
+                label = f"scroll to {pos.get('top', 0)}px" + (
+                    "" if pos.get("doc") else f" ({label or 'container'})")
             out.append({
                 "act": s.act.value,
                 "target": label or (t.sid if t else None) or "—",
@@ -293,7 +326,24 @@ class Recorder:
                 steps.append(Step(act=Act.PRESS, target=target))
                 steps.append(Step(act=Act.WAIT_READY))
 
+            elif kind == "scroll":
+                # D-037: collapse consecutive scrolls of the same container —
+                # only the resting position needs replaying.
+                if (steps and steps[-1].act == Act.SCROLL
+                        and _same_scroll_target(steps[-1].target, target)):
+                    steps[-1].value = ev.get("value")
+                    continue
+                steps.append(Step(act=Act.SCROLL, target=target, value=ev.get("value")))
+
         return steps
+
+
+def _same_scroll_target(a: Target | None, b: Target | None) -> bool:
+    if a is None and b is None:
+        return True                      # both document-level
+    if a is None or b is None:
+        return False
+    return _same_target(a, b)
 
 
 def _same_target(a: Target, b: Target) -> bool:
