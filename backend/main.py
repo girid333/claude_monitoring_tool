@@ -344,7 +344,15 @@ async def events(run_id: str) -> StreamingResponse:
     async def stream():
         q = _event_queues[run_id]
         while True:
-            ev = await q.get()
+            # D-029: heartbeat every 15s — a Core BASIS sweep can go minutes
+            # between real events, and idle SSE connections get dropped by
+            # some proxies/browsers. SSE comments (lines starting ":") are
+            # ignored by EventSource but keep the connection alive.
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=15)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
             yield f"data: {json.dumps(ev)}\n\n"
             if ev.get("type") == "run_done":
                 break
