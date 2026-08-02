@@ -36,11 +36,15 @@ const DOT = { ok: "var(--green)", warn: "var(--orange)", crit: "var(--red)" };
 export default function Landscape() {
   const [systems, setSystems] = useState<SystemRow[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [coreBasis, setCoreBasis] = useState(true);
+  // D-036: Core BASIS is OFF by default — a 23-T-code sweep takes minutes,
+  // so it should be a deliberate choice, not something you opt out of.
+  const [coreBasis, setCoreBasis] = useState(false);
   const [loadError, setLoadError] = useState("");
-  // D-034: pick WHICH recorded flows to replay
+  // D-034/D-036: pick WHICH recorded flows to replay, with search + bulk select
   const [flowLib, setFlowLib] = useState<FlowInfo[]>([]);
   const [pickedFlows, setPickedFlows] = useState<Set<string>>(new Set());
+  const [flowQuery, setFlowQuery] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const run = useRun();
 
@@ -51,6 +55,28 @@ export default function Landscape() {
   }, [run.done]);
 
   const canRun = selected.size > 0 && (coreBasis || pickedFlows.size > 0) && !run.isRunning;
+
+  // D-036: filter the flow library — there can be hundreds of recordings.
+  const q = flowQuery.trim().toLowerCase();
+  const visibleFlows = q
+    ? flowLib.filter(f =>
+        f.flow_id.toLowerCase().includes(q)
+        || (f.description || "").toLowerCase().includes(q)
+        || f.tcodes.some(t => (t || "").toLowerCase().includes(q)))
+    : flowLib;
+
+  const deleteFlow = async (flowId: string) => {
+    try {
+      const res = await fetch(`${API}/api/flows/${encodeURIComponent(flowId)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      setFlowLib(prev => prev.filter(f => f.flow_id !== flowId));
+      setPickedFlows(prev => { const n = new Set(prev); n.delete(flowId); return n; });
+    } catch (err) {
+      setLoadError(`Could not delete ${flowId}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setConfirmDelete(null);
+    }
+  };
 
   const doneCount = run.tcodes.filter(t => ["done", "warn"].includes(run.tcodeStatus[t])).length;
   const pct = run.tcodes.length ? Math.round((doneCount / run.tcodes.length) * 100) : 0;
@@ -90,43 +116,88 @@ export default function Landscape() {
 
       {/* ── D-034: choose which recorded flows to replay ── */}
       <div className="panel" style={{ padding: "14px 18px", marginBottom: 22, borderRadius: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
           <div style={{ fontSize: 13, fontWeight: 600 }}>Functional flows (recordings)</div>
           <div style={{ fontSize: 11.5, color: "var(--text-3)" }}>
             {pickedFlows.size > 0 ? `${pickedFlows.size} selected` : "none selected"}
+            {q && ` · ${visibleFlows.length} of ${flowLib.length} shown`}
           </div>
           <a href="/recorder" style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--blue)" }}>
             + Record a new flow
           </a>
         </div>
+
         {flowLib.length === 0 ? (
           <div className="rsub">
             No recordings yet — use the <a href="/recorder" style={{ color: "var(--blue)" }}>Recorder</a> to
             capture a transaction, then it appears here.
           </div>
         ) : (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {flowLib.map(f => {
-              const on = pickedFlows.has(f.flow_id);
-              return (
-                <button key={f.flow_id} className="btn secondary"
-                        onClick={() => setPickedFlows(prev => {
-                          const n = new Set(prev);
-                          if (n.has(f.flow_id)) n.delete(f.flow_id); else n.add(f.flow_id);
-                          return n;
-                        })}
-                        title={`${f.step_count} steps${f.tcodes.length ? ` · ${f.tcodes.join(", ")}` : ""}${f.has_capture ? " · has screenshots" : ""}`}
-                        style={{ borderRadius: 999, fontSize: 12.5,
-                                  outline: on ? "2px solid var(--blue)" : "none",
-                                  color: on ? "var(--blue)" : undefined }}>
-                  {on ? "✓ " : ""}{f.flow_id}
-                  <span style={{ color: "var(--text-3)", marginLeft: 6 }}>
-                    {f.tcodes.length ? f.tcodes.join(",") : `${f.step_count} steps`}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <>
+            {/* D-036: search + bulk select — the library grows to hundreds */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+              <input className="input" value={flowQuery} onChange={e => setFlowQuery(e.target.value)}
+                     placeholder="Search by name, T-code or description…"
+                     style={{ flex: "1 1 260px", minWidth: 200 }} />
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "5px 10px" }}
+                      onClick={() => setPickedFlows(prev => {
+                        const n = new Set(prev);
+                        visibleFlows.forEach(f => n.add(f.flow_id));
+                        return n;
+                      })}>
+                Select {q ? "filtered" : "all"}
+              </button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "5px 10px" }}
+                      disabled={pickedFlows.size === 0}
+                      onClick={() => setPickedFlows(new Set())}>Clear</button>
+            </div>
+
+            {visibleFlows.length === 0 ? (
+              <div className="rsub">No recordings match &quot;{flowQuery}&quot;.</div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8,
+                             maxHeight: 220, overflowY: "auto" }}>
+                {visibleFlows.map(f => {
+                  const on = pickedFlows.has(f.flow_id);
+                  const confirming = confirmDelete === f.flow_id;
+                  return (
+                    <span key={f.flow_id} className="btn secondary"
+                          style={{ borderRadius: 999, fontSize: 12.5, display: "inline-flex",
+                                    alignItems: "center", gap: 6, cursor: "default",
+                                    outline: on ? "2px solid var(--blue)" : "none",
+                                    color: on ? "var(--blue)" : undefined }}>
+                      <span onClick={() => setPickedFlows(prev => {
+                              const n = new Set(prev);
+                              if (n.has(f.flow_id)) n.delete(f.flow_id); else n.add(f.flow_id);
+                              return n;
+                            })}
+                            title={`${f.step_count} steps${f.tcodes.length ? ` · ${f.tcodes.join(", ")}` : ""}${f.has_capture ? " · has screenshots" : ""}`}
+                            style={{ cursor: "pointer" }}>
+                        {on ? "✓ " : ""}{f.flow_id}
+                        <span style={{ color: "var(--text-3)", marginLeft: 6 }}>
+                          {f.tcodes.length ? f.tcodes.join(",") : `${f.step_count} steps`}
+                        </span>
+                      </span>
+                      {/* D-036: delete a recording */}
+                      {confirming ? (
+                        <>
+                          <span onClick={() => deleteFlow(f.flow_id)}
+                                style={{ color: "var(--red)", fontWeight: 700, cursor: "pointer" }}
+                                title="Confirm delete">delete?</span>
+                          <span onClick={() => setConfirmDelete(null)}
+                                style={{ color: "var(--text-3)", cursor: "pointer" }}>✕</span>
+                        </>
+                      ) : (
+                        <span onClick={() => setConfirmDelete(f.flow_id)}
+                              title="Delete this recording"
+                              style={{ color: "var(--text-3)", cursor: "pointer", paddingLeft: 2 }}>🗑</span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
 
