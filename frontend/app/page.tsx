@@ -37,6 +37,7 @@ export default function Landscape() {
   // persist after the run ends (the island itself disappears on run_done).
   const [runErrors, setRunErrors] = useState<string[]>([]);
   const [lastRunDone, setLastRunDone] = useState(false);
+  const [statusLine, setStatusLine] = useState("");
 
   useEffect(() => {
     fetch(`${API}/api/systems`).then(r => r.json()).then(setSystems).catch(() => {});
@@ -48,30 +49,55 @@ export default function Landscape() {
     es.onmessage = e => {
       const ev: IslandEvent = JSON.parse(e.data);
       setIslandEvents(prev => [...prev, ev]);
+      // D-029: live phase text — login/probe/Core BASIS take minutes with no
+      // chip events, which read as "nothing is happening" without this.
+      if (ev.type === "system_start") setStatusLine(`Processing ${ev.sid}: logging in…`);
+      if (ev.type === "probe") setStatusLine(`${ev.sid}: logged in, probing capabilities…`);
+      if (ev.type === "flow_start") setStatusLine(`${ev.sid}: running flow ${ev.flow_id}…`);
+      if (ev.type === "core_basis_start") setStatusLine(`${ev.sid}: Core BASIS sweep running (23 T-codes — takes several minutes)…`);
+      if (ev.type === "core_basis_done") setStatusLine(`${ev.sid}: Core BASIS done`);
+      if (ev.type === "report_start") setStatusLine(`${ev.sid}: generating Word/PDF report…`);
       if (ev.type === "system_error") {
         setRunErrors(prev => [...prev, `${ev.sid}: ${ev.error ?? "unknown error"}`]);
       }
       if (ev.type === "run_error") {
         setRunErrors(prev => [...prev, `Run failed: ${ev.error ?? "unknown error"}`]);
       }
-      if (ev.type === "run_done") { es.close(); setRunId(null); setLastRunDone(true); }
+      if (ev.type === "run_done") { es.close(); setRunId(null); setLastRunDone(true); setStatusLine(""); }
+    };
+    es.onerror = () => {
+      if (es.readyState !== EventSource.CLOSED) return;  // auto-reconnecting
+      setRunId(null); setLastRunDone(true); setStatusLine("");
+      setRunErrors(prev => [...prev, "Lost connection to the run's event stream — check the Runs page and backend logs."]);
     };
     return () => es.close();
   }, [runId]);
 
   const startRun = async () => {
-    const res = await fetch(`${API}/api/run`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sids: [...selected],
-        flows: includeFlows ? ["flows/sm37_cancelled_jobs.json"] : [],
-        include_core_basis: includeCoreBasis,   // D-026: was hardcoded false
-      }),
-    });
     setIslandEvents([]);
     setRunErrors([]);
     setLastRunDone(false);
-    setRunId((await res.json()).run_id);
+    setStatusLine("Starting run…");
+    try {
+      const res = await fetch(`${API}/api/run`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sids: [...selected],
+          flows: includeFlows ? ["flows/sm37_cancelled_jobs.json"] : [],
+          include_core_basis: includeCoreBasis,   // D-026: was hardcoded false
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const body = await res.json();
+      if (!body.run_id) throw new Error(`backend returned no run_id: ${JSON.stringify(body)}`);
+      setRunId(body.run_id);
+    } catch (err) {
+      // D-029: a failed POST used to vanish into an unhandled rejection —
+      // the exact "clicked Run sweep, nothing happened" failure mode.
+      setStatusLine("");
+      setLastRunDone(true);
+      setRunErrors([`Could not start the run via ${API}: ${err instanceof Error ? err.message : String(err)}`]);
+    }
   };
 
   const islandChips = useMemo(
@@ -93,9 +119,11 @@ export default function Landscape() {
             <span style={{
               width: 9, height: 9, borderRadius: "50%", background: "var(--green)",
             }} />
-            <div>
+            <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Bulk run</div>
-              <div style={{ fontSize: 11, color: "var(--text-3)" }}>Run {runId}</div>
+              <div style={{ fontSize: 11, color: "var(--text-3)", whiteSpace: "nowrap" }}>
+                {statusLine || `Run ${runId}`}
+              </div>
             </div>
             <div style={{ display: "flex", gap: 6, flex: 1, justifyContent: "flex-end", flexWrap: "wrap" }}>
               {islandChips.map((e, i) => {
