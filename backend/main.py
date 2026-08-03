@@ -659,7 +659,7 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
     from engine.login.base import SystemTarget
     from engine.probe import probe
     from engine.recovery import dismiss_known_popups
-    from engine.schema import Flow
+    from engine.schema import Flow, FlowRunResult
     from engine.sections import CoreBasisSection, SectionResult, build_reports
 
     reg = Registry.load(SYSTEMS_PATH)
@@ -695,15 +695,32 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                         await emit(run_id, {"type": "system_error", "sid": sid,
                                             "error": f"flow not found: {flow_path}"})
                         continue
-                    flow = Flow(**json.loads(p.read_text()))
-                    await emit(run_id, {"type": "flow_start", "sid": sid,
-                                        "flow_id": flow.flow_id})
-                    await dismiss_known_popups(page)
-                    fr = await engine.run(flow)
+                    # D-040: each selected flow gets its OWN try/except.
+                    # Before this, a single flow that failed to even LOAD
+                    # (malformed JSON, a schema mismatch from an older
+                    # recording) raised out of this loop entirely — caught
+                    # only by the per-SYSTEM try/except further down, which
+                    # meant every flow after the broken one, AND the report
+                    # generation step for flow(s) that already succeeded,
+                    # never ran. Selecting N recordings must produce N
+                    # documents (one per recording, error or not) — a single
+                    # bad flow can no longer take its siblings down with it.
+                    try:
+                        flow = Flow(**json.loads(p.read_text()))
+                        await emit(run_id, {"type": "flow_start", "sid": sid,
+                                            "flow_id": flow.flow_id})
+                        await dismiss_known_popups(page)
+                        fr = await engine.run(flow)
+                    except Exception as exc:  # noqa: BLE001
+                        flow_id = Path(flow_path).stem
+                        await emit(run_id, {"type": "system_error", "sid": sid,
+                                            "error": f"flow {flow_id} failed to load/run: {exc!r}"})
+                        fr = FlowRunResult(run_id=run_id, sid=sid, flow_id=flow_id,
+                                           mode="dom", ok=False, error=repr(exc))
                     store.save(fr)
                     flow_results.append(fr)
                     await emit(run_id, {
-                        "type": "flow_done", "sid": sid, "flow_id": flow.flow_id,
+                        "type": "flow_done", "sid": sid, "flow_id": fr.flow_id,
                         "ok": fr.ok,
                         "failed_checks": sum(1 for c in fr.checks if not c.ok)})
 
@@ -750,8 +767,13 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                         store.save_report(run_id, sid, a.get("docx"), a.get("pdf"),
                                            label=a.get("label", ""), kind=a.get("kind", ""))
                     await emit(run_id, {"type": "report_ready", "sid": sid,
-                                        "reports": [{"label": a["label"], "kind": a["kind"]}
+                                        "reports": [{"label": a["label"], "kind": a["kind"],
+                                                     "error": a.get("error")}
                                                      for a in artifacts]})
+                    failed = [a["label"] for a in artifacts if a.get("error")]
+                    if failed:
+                        await emit(run_id, {"type": "system_error", "sid": sid,
+                                            "error": f"report generation failed for: {', '.join(failed)}"})
             except Exception as exc:  # noqa: BLE001
                 await emit(run_id, {"type": "system_error", "sid": sid,
                                     "error": repr(exc)})

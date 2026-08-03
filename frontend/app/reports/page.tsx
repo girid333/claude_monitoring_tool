@@ -160,6 +160,12 @@ export default function Reports() {
                       <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/${r.sid}/download/pdf${qs}`}
                          style={{ textDecoration: "none" }}>PDF</a>
                     )}
+                    {/* D-040: report generation failed for this flow — the row
+                        still appears (it's not silently dropped) but there's
+                        nothing to download. */}
+                    {!r.docx_path && !r.pdf_path && (
+                      <span style={{ fontSize: 11.5, color: "var(--red)" }}>generation failed</span>
+                    )}
                     <a className="btn secondary" href={`${API}/api/reports/${r.run_id}/download/zip`}
                        title="Every report from this run, zipped" style={{ textDecoration: "none" }}>ZIP</a>
                     {confirming === key ? (

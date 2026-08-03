@@ -121,6 +121,20 @@ _INJECT_JS = r"""
     } catch (e) { return null; }
   }
 
+  // D-040: SAP renders checkboxes as ARIA spans (role="checkbox",
+  // aria-checked="true|false"), not native <input type="checkbox">, and they
+  // rarely carry a distinguishing name/title. Position among all
+  // role="checkbox" elements on the screen is what's stable — SAP always
+  // renders a selection screen's checkboxes in the same order.
+  function checkboxIndex(el) {
+    if (!(el.getAttribute && el.getAttribute("role") === "checkbox")) return null;
+    try {
+      const all = [...document.querySelectorAll('[role="checkbox"]')];
+      const i = all.indexOf(el);
+      return i >= 0 ? i : null;
+    } catch (e) { return null; }
+  }
+
   function domMeta(el) {
     const txt = ((el.innerText !== undefined ? el.innerText : el.value) || "").trim();
     return {
@@ -135,6 +149,7 @@ _INJECT_JS = r"""
       nth: nthAmongSimilar(el),
       path: structuralPath(el),
       frame_url: location.href,
+      checkbox_index: checkboxIndex(el),
     };
   }
 
@@ -163,6 +178,19 @@ _INJECT_JS = r"""
       "[role=tab],[role=treeitem],[role=checkbox],td,tr")) || ev.target;
     // a click that merely focuses a text field isn't a step — its change is
     if (el.tagName === "INPUT" && ["text", "password", "search"].indexOf(el.type) >= 0) return;
+
+    // D-040: a checkbox click is not "press this button" — it's "set this
+    // checkbox to a specific state". Recording it as a blind click/press
+    // means replay always TOGGLES, which only happens to match if the
+    // screen's starting state is identical every time. Recording the
+    // END state (captured here, in the capture phase, BEFORE SAP's own
+    // handler flips aria-checked) makes replay an absolute set instead —
+    // it lands on the right state even if the starting state differs.
+    if (el.getAttribute && el.getAttribute("role") === "checkbox") {
+      const wasChecked = el.getAttribute("aria-checked") === "true";
+      emit("set", ev, el, !wasChecked);
+      return;
+    }
     emit("click", ev, el);
   }, true);
 
@@ -368,7 +396,15 @@ def _same_target(a: Target, b: Target) -> bool:
     if a.sid and b.sid:
         return a.sid == b.sid
     if a.dom and b.dom:
-        return (a.dom.pos_id or a.dom.path) == (b.dom.pos_id or b.dom.path)
+        # D-040: checkbox spans commonly have neither pos_id nor path, so the
+        # fallback below used to compare None == None -> True, silently
+        # coalescing DIFFERENT checkboxes' "set" events into one step (only
+        # the last value survived). checkbox_index is the reliable identity
+        # here; when either side has one, compare on that alone.
+        if a.dom.checkbox_index is not None or b.dom.checkbox_index is not None:
+            return a.dom.checkbox_index == b.dom.checkbox_index
+        key_a, key_b = a.dom.pos_id or a.dom.path, b.dom.pos_id or b.dom.path
+        return key_a is not None and key_a == key_b
     return False
 
 

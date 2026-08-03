@@ -237,11 +237,15 @@ def build_reports(section_results: list[SectionResult], output_dir: str = "repor
                         if sr.v1_results is not None), None)
     if v1_results:
         from report_composer import ReportGenerator
-        gen = ReportGenerator(v1_results, output_dir=output_dir,
-                               cover_image_path=cover_image_path,
-                               extra_sections=[])
-        out.append({"kind": "core_basis", "label": "Core BASIS",
-                    "docx": gen.generate_word(), "pdf": gen.generate_pdf()})
+        try:
+            gen = ReportGenerator(v1_results, output_dir=output_dir,
+                                   cover_image_path=cover_image_path,
+                                   extra_sections=[])
+            out.append({"kind": "core_basis", "label": "Core BASIS",
+                        "docx": gen.generate_word(), "pdf": gen.generate_pdf()})
+        except Exception as exc:  # noqa: BLE001 — see flow loop below for why
+            out.append({"kind": "core_basis", "label": "Core BASIS",
+                        "docx": None, "pdf": None, "error": repr(exc)})
 
     # One report per recorded flow, named by the flow (D-035).
     from flow_report import FlowReportGenerator
@@ -250,9 +254,19 @@ def build_reports(section_results: list[SectionResult], output_dir: str = "repor
         for row in flow_results_to_report_rows(sr.flow_results):
             rows_by_flow.setdefault(row["flow_id"], []).append(row)
     for flow_id, rows in rows_by_flow.items():
-        fgen = FlowReportGenerator(flow_id, rows, output_dir=output_dir)
-        out.append({"kind": "flow", "label": flow_id,
-                    "docx": fgen.generate_word(), "pdf": fgen.generate_pdf()})
+        # D-040: each flow's document is generated independently. Before
+        # this, one flow's doc raising (a corrupt field, an image the guards
+        # elsewhere didn't anticipate) propagated straight out of this
+        # function — main.py's caller never got ANY artifacts back, so even
+        # flows that built cleanly lost their report for that run. Selecting
+        # N recordings must produce N documents.
+        try:
+            fgen = FlowReportGenerator(flow_id, rows, output_dir=output_dir)
+            out.append({"kind": "flow", "label": flow_id,
+                        "docx": fgen.generate_word(), "pdf": fgen.generate_pdf()})
+        except Exception as exc:  # noqa: BLE001
+            out.append({"kind": "flow", "label": flow_id,
+                        "docx": None, "pdf": None, "error": repr(exc)})
 
     return out
 

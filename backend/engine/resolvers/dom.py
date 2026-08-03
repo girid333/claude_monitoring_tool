@@ -35,6 +35,19 @@ class DomResolver(Resolver):
         if dom is None:
             raise ResolveError(target, tried=["<no dom candidates recorded>"])
 
+        # Tier 0 — D-040: positional checkbox match. SAP renders checkboxes
+        # as ARIA spans (role="checkbox") that usually have no distinguishing
+        # name/title, so the generic attr/label chain below tends to either
+        # miss them or, worse, match the SAME element for every checkbox on
+        # the screen (all six would resolve to `.first`). Position among all
+        # role="checkbox" elements is what's actually stable here — ported
+        # from v1's SM37 job-overview fix (get_by_role("checkbox").nth(i)).
+        if dom.role == "checkbox" and dom.checkbox_index is not None:
+            loc = self.page.locator('[role="checkbox"]').nth(dom.checkbox_index)
+            tried.append(f"checkbox_index:{dom.checkbox_index}")
+            if await self._usable(loc):
+                return Resolution(loc, 0.9, f"checkbox_index:{dom.checkbox_index}", self.name)
+
         # Tier 1 — semantic attributes
         if dom.attr:
             selector = "".join(f'[{k}*="{v}"]' if k == "id" else f'[{k}="{v}"]'
@@ -123,7 +136,7 @@ class DomResolver(Resolver):
     async def set_value(self, res: Resolution, value: Any) -> None:
         loc: Locator = res.handle
         if isinstance(value, bool):
-            await loc.set_checked(value)
+            await self._set_checkbox(loc, value)
         else:
             # v1 lesson (§6.8): JS-injected value beats .fill() on some SAP
             # inputs with CSS visibility tricks. Try fill, fall back to JS.
@@ -134,6 +147,36 @@ class DomResolver(Resolver):
                     "(el, v) => { el.value = v; el.dispatchEvent(new Event('change', {bubbles:true})); }",
                     str(value),
                 )
+
+    async def _set_checkbox(self, loc: Locator, want: bool) -> None:
+        """D-040: SAP WebGUI checkboxes are ARIA widgets — `<span
+        role="checkbox" aria-checked="true|false">`, not a real `<input
+        type="checkbox">`. Playwright's `set_checked()`/`check()` require a
+        genuine checkbox/radio input and either throw or silently no-op on
+        the ARIA span, which is why recorded unchecks weren't replaying.
+        This mirrors the fix v1 already proved out for SM37's job-overview
+        screen (sap_automator.py): read the CURRENT state from
+        `aria-checked`, and only click when it differs from what's wanted —
+        a click always TOGGLES, there's no direct "set" on these widgets, so
+        blindly clicking can just as easily undo the desired state as apply
+        it.
+        """
+        role = await loc.get_attribute("role")
+        aria = await loc.get_attribute("aria-checked")
+        if role == "checkbox" or aria is not None:
+            have = aria == "true"
+            if have != want:
+                await loc.click()
+                await self.page.wait_for_timeout(400)  # let SAP repaint aria-checked
+            return
+        # Genuine native input/role-less element — Playwright's own
+        # primitive is correct here; only fall back to click if it balks.
+        try:
+            await loc.set_checked(want)
+        except Exception:  # noqa: BLE001
+            have = await loc.is_checked()
+            if have != want:
+                await loc.click()
 
     async def press(self, res: Resolution) -> None:
         await res.handle.click()

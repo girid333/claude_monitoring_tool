@@ -38,6 +38,15 @@ class DomCandidates(BaseModel):
     nth: Optional[int] = None                  # D-033: index among identical matches
     path: Optional[str] = None                 # D-033: structural CSS path, last resort
     frame_url: Optional[str] = None            # D-033: iframe the element lives in
+    # D-040: SAP WebGUI checkboxes are ARIA widgets — <span role="checkbox"
+    # aria-checked="true|false"> — not native <input type="checkbox">, and
+    # they usually carry no distinguishing name/title/label. `checkbox_index`
+    # is the element's 0-based position among every role="checkbox" element
+    # on the screen at record time — a stable, deterministic key for a
+    # selection screen that always renders the same checkboxes in the same
+    # order (e.g. SM37 job overview: Scheduled/Released/Ready/Active/
+    # Finished/Cancelled).
+    checkbox_index: Optional[int] = None
 
 
 class Target(BaseModel):
