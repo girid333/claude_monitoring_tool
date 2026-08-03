@@ -68,6 +68,10 @@ class RawCallRequest(BaseModel):
     sid: str
     function: str
     params: dict = {}
+    # Names of TABLES parameters to declare (empty) in the request. SAP does
+    # NOT return a table the caller didn't declare, so diagnosing "why is this
+    # empty?" almost always means naming the table here.
+    tables: list[str] = []
     include_xml: bool = True
 
 
@@ -111,8 +115,11 @@ def raw_call(req: RawCallRequest) -> dict:
     It doubles as the fastest way to wire up a custom Z_* remote-enabled
     FM: call it here, see the shape, then add a declarative entry."""
     client = _client_for(req.sid)
+    params = dict(req.params or {})
+    for name in req.tables:
+        params.setdefault(name, [])
     try:
-        parsed, raw = client.call_raw(req.function, **(req.params or {}))
+        parsed, raw = client.call_raw(req.function, **params)
     except RfcSoapError as exc:
         return {"ok": False, "function": req.function, "error": exc.message,
                 "error_kind": exc.kind, "detail": exc.detail}

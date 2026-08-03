@@ -62,10 +62,28 @@ class RfcCheck:
     # as success — the exact failure the first live F4H run produced. Flag it
     # instead of rendering a reassuring empty table.
     expects_rows: bool = True
+    # TABLES parameters to declare (empty) in the request envelope.
+    #
+    # THE ROOT CAUSE of the second live F4H sweep, where every table-returning
+    # check came back with zero rows while RFC_SYSTEM_INFO — the only one
+    # returning an EXPORT structure rather than a TABLE — returned perfect
+    # data. SAP's SOAP RFC handler only sends back a TABLES parameter that the
+    # CALLER declared in the request. Omit it and you get a successful,
+    # completely empty response. Most tellingly, RFC_READ_TABLE was being sent
+    # FIELDS but never DATA — and DATA is the table that holds the rows.
+    tables: list[str] = field(default_factory=list)
+
+    def call_params(self) -> dict:
+        """Params plus an empty element for each declared TABLES parameter,
+        without which SAP simply won't return that table (see `tables`)."""
+        merged = dict(self.params)
+        for name in self.tables:
+            merged.setdefault(name, [])
+        return merged
 
     def run(self, client: RfcSoapClient) -> CheckResult:
         try:
-            reply = client.call(self.function, **self.params)
+            reply = client.call(self.function, **self.call_params())
         except RfcSoapError as exc:
             return CheckResult(self.check_id, self.title, ok=False, error=exc.message,
                                 error_kind=exc.kind, function=self.function)
@@ -258,16 +276,18 @@ CHECKS: list[RfcCheck] = [
     ),
     RfcCheck(
         check_id="work_processes", title="Work processes", tcode="SM50",
-        function="TH_WPINFO", params={"SRVNAME": ""}, interpret=_interpret_wpinfo,
-        confidence="unverified",
-        note="TH_WPINFO is the standard WP-list FM; field names can vary slightly by release.",
+        function="TH_WPINFO", params={"SRVNAME": ""}, tables=["WPLIST"],
+        interpret=_interpret_wpinfo, confidence="unverified",
+        note="TH_WPINFO is the standard WP-list FM. WPLIST must be declared in the "
+             "request or SAP returns nothing at all.",
     ),
     RfcCheck(
         check_id="server_list", title="Active servers", tcode="SM51",
-        function="TH_SERVER_LIST", interpret=_interpret_server_list,
-        confidence="unverified",
-        note="Returns the instance list; table parameter name differs across releases "
-             "(SERVER_LIST vs SERVERS) — both are handled.",
+        function="TH_SERVER_LIST", tables=["SERVER_LIST"],
+        interpret=_interpret_server_list, confidence="unverified",
+        note="Returns the instance list. The table name differs across releases "
+             "(SERVER_LIST vs SERVERS); if this stays empty, use /api/rfc/raw to see "
+             "which name this release uses.",
     ),
     # NOTE (live finding, F4H rel 758): the original ST22 check queried
     # SNAP and failed with TABLE_NOT_AVAILABLE. That is not a permissions
@@ -284,6 +304,9 @@ CHECKS: list[RfcCheck] = [
                             {"FIELDNAME": "STATUS"}, {"FIELDNAME": "STRTDATE"},
                             {"FIELDNAME": "STRTTIME"}],
                 "ROWCOUNT": 200},
+        # DATA is the table holding the actual rows. Sending FIELDS without
+        # DATA is exactly why this returned "0 job(s)" against the live system.
+        tables=["DATA"],
         interpret=_interpret_job_table, confidence="verified",
         note="TBTCO is the transparent table behind SM37, so this works via "
              "RFC_READ_TABLE and doubles as a fallback if the XBP interface "
@@ -314,7 +337,10 @@ def run_job_check(client: RfcSoapClient, max_jobs: int = 200) -> CheckResult:
                                                 "ABORTED": "X", "FINISHED": "X",
                                                 "RUNNING": "X", "READY": "X",
                                                 "SCHEDUL": "X", "RELEASED": "X"},
-                             MAX_SELECT=max_jobs)
+                             MAX_SELECT=max_jobs,
+                             # Declare the result table, or SAP returns nothing
+                             # at all (see RfcCheck.tables).
+                             JOB_HEAD=[], SELECTED_JOBS=[])
         rows, anomalies, summary = _interpret_xbp_jobs(reply)
         suspicious = ""
         if not rows:

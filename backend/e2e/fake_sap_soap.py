@@ -12,6 +12,7 @@ Deliberately adversarial in the ways a real system is:
     single most likely real-world setup failure
 """
 import base64
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 USER, PASSWORD = "MONITOR", "secret"
@@ -179,6 +180,36 @@ RESPONSES = {
 }
 
 
+# Which TABLES parameter each FM returns. Real SAP only sends a TABLES
+# parameter back if the CALLER declared it in the request envelope — which
+# is precisely why the first live F4H sweep got perfect data from
+# RFC_SYSTEM_INFO (an EXPORT structure) and empty results from every
+# table-returning FM. Reproducing that here turns the bug into a permanent
+# regression guard instead of a one-off fix.
+TABLE_PARAM = {
+    "TH_WPINFO": "WPLIST",
+    "TH_WPINFO_ALT": "WP_TABLE",
+    "TH_SERVER_LIST": "SERVER_LIST",
+    "BAPI_XBP_JOB_SELECT": "JOB_HEAD",
+    "RFC_READ_TABLE": "DATA",
+}
+
+_TABLE_BLOCK = re.compile(
+    r"<(?P<name>[A-Z_0-9]+)>\s*<item>.*?</item>\s*</(?P=name)>", re.S)
+
+
+def _apply_table_rules(function: str, xml: str, request_body: str) -> str:
+    """Strip the data table from the reply unless the request declared it."""
+    table = TABLE_PARAM.get(function)
+    if not table:
+        return xml
+    declared = (f"<{table}>" in request_body) or (f"<{table} />" in request_body) \
+        or (f"<{table}/>" in request_body)
+    if declared:
+        return xml
+    return re.sub(rf"<{table}>.*?</{table}>", f"<{table}/>", xml, flags=re.S)
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, body: str, status: int = 200) -> None:
         raw = body.encode()
@@ -213,7 +244,7 @@ class H(BaseHTTPRequestHandler):
             return
         for name, xml in RESPONSES.items():
             if name in body:
-                self._send(xml)
+                self._send(_apply_table_rules(name, xml, body))
                 return
         self._send(FAULT, 500)
 

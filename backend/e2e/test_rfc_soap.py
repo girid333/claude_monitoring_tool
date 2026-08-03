@@ -26,6 +26,17 @@ BASE = f"http://127.0.0.1:{PORT}"
 
 ok = True
 
+# the system_info check is the one legitimately-table-free check
+_interpret_sysinfo_marker = next(
+    c.interpret for c in basis_checks.CHECKS if c.check_id == "system_info")
+
+
+def _rows_of(reply, name):
+    value = reply.get(name)
+    if isinstance(value, list):
+        return value
+    return [value] if isinstance(value, dict) and value else []
+
 
 def check(n, c, d=""):
     global ok
@@ -155,7 +166,7 @@ try:
     # ---- 19-21. THE LIVE-F4H BUGS, reproduced and fixed ----
     # 19: table arriving under a different name (release variation) must
     #     still be found, instead of "succeeded, 0 rows".
-    alt = basis_checks._first_table(client.call("TH_WPINFO_ALT"), "WPLIST")
+    alt = basis_checks._first_table(client.call("TH_WPINFO_ALT", WP_TABLE=[]), "WPLIST")
     check("19. Table under an UNEXPECTED name is still found (no silent 0 rows)",
           len(alt) == 2, alt)
 
@@ -186,9 +197,40 @@ try:
           hasattr(client, "_http") and client._http is not None)
 
     # ---- 24. raw diagnostic returns the actual shape ----
-    parsed, rawxml = client.call_raw("TH_WPINFO")
+    parsed, rawxml = client.call_raw("TH_WPINFO", WPLIST=[])
     check("24. call_raw() exposes parsed keys AND raw XML for diagnosis",
           "WPLIST" in parsed and b"WPLIST" in rawxml, sorted(parsed.keys()))
+
+    # ---- 25-28. THE ROOT CAUSE: TABLES must be declared in the request ----
+    # The fake server now behaves like real SAP: it omits a TABLES parameter
+    # the caller didn't declare. This is what made every table-returning
+    # check come back empty on the live system while RFC_SYSTEM_INFO (an
+    # EXPORT structure) worked perfectly.
+    undeclared = client.call("TH_WPINFO")            # no WPLIST declared
+    check("25. REPRODUCES the live bug: undeclared table comes back empty",
+          not _rows_of(undeclared, "WPLIST"), undeclared)
+    declared = client.call("TH_WPINFO", WPLIST=[])   # declared
+    check("26. THE FIX: declaring the table returns the rows",
+          len(_rows_of(declared, "WPLIST")) == 3, declared)
+
+    # every shipped check must declare its result table
+    missing = [c.check_id for c in basis_checks.CHECKS
+               if c.expects_rows and c.interpret is not _interpret_sysinfo_marker
+               and not c.tables]
+    check("27. Every row-returning check declares its TABLES parameter",
+          missing == [], missing)
+
+    envelope = build_envelope("RFC_READ_TABLE",
+                              next(c for c in basis_checks.CHECKS
+                                   if c.check_id == "job_table").call_params()).decode()
+    check("28. RFC_READ_TABLE request declares DATA (the rows table), not just FIELDS",
+          "<DATA" in envelope and "<FIELDS" in envelope, envelope[:300])
+
+    # and the checks now genuinely return data through the strict server
+    strict = basis_checks.run_all(client)
+    empty = [r.check_id for r in strict if r.ok and not r.rows]
+    check("29. Against a strict SAP-like server, no check returns empty",
+          empty == [], empty)
 
 finally:
     srv.terminate()

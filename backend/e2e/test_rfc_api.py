@@ -98,7 +98,8 @@ try:
           r.json()["checks"])
 
     # ---- raw diagnostic: the endpoint that ends field-name guesswork ----
-    r = c.post("/api/rfc/raw", json={"sid": "F4H", "function": "TH_WPINFO"})
+    r = c.post("/api/rfc/raw", json={"sid": "F4H", "function": "TH_WPINFO",
+                                      "tables": ["WPLIST"]})
     body = r.json()
     check("12b. POST /api/rfc/raw returns the ACTUAL response shape",
           r.status_code == 200 and body["ok"] and "WPLIST" in body["top_level_keys"],
