@@ -137,6 +137,8 @@ class RealEngine(EngineBase):
         self._recording = False
         self._prev_snapshot: dict[str, Any] = {}
         self._steps: list[dict] = []
+        self._child_accessor: Optional[str] = None  # cached once _iter_children finds one that works
+        self._walk_error: Optional[str] = None
 
     def _connect(self):
         import win32com.client  # noqa: PLC0415
@@ -182,6 +184,43 @@ class RealEngine(EngineBase):
             return {"hostname": platform.node(), "username": "", "sap_gui_version": "",
                      "scripting_enabled": False, "error": str(exc)}
 
+    def _iter_children(self, node):
+        """SAP GUI Scripting's collection objects are accessed differently
+        depending on which one it is — GuiApplication/GuiConnection use the
+        default indexer (`Children(i)`), while walking an arbitrary
+        GuiComponent's children tree commonly needs `.Children.ElementAt(i)`
+        instead. Rather than gamble on one and silently capture NOTHING if
+        it's wrong (which is exactly what happened before this fix — the
+        walk died on the very first child, every snapshot stayed empty, and
+        recording looked like it was doing nothing no matter what the user
+        did), try both and remember whichever works for this node's
+        collection so later calls skip straight to it."""
+        children = node.Children
+        count = children.Count
+        if count == 0:
+            return
+        for accessor in (self._child_accessor, ) if self._child_accessor else \
+                ("element_at", "indexer", "item"):
+            try:
+                for i in range(count):
+                    if accessor == "element_at":
+                        child = children.ElementAt(i)
+                    elif accessor == "indexer":
+                        child = children(i)
+                    else:
+                        child = children.Item(i)
+                    yield child
+                self._child_accessor = accessor
+                return
+            except Exception:  # noqa: BLE001 - try the next accessor style
+                continue
+        # every accessor style failed — surface this once instead of an
+        # endless silent "0 steps" with no explanation.
+        if not self._walk_error:
+            self._walk_error = ("Could not enumerate child elements on the SAP GUI "
+                                 "screen (tried ElementAt/indexer/Item) — recording "
+                                 "will likely capture nothing. Please report this.")
+
     def _snapshot(self, node, path: str, out: dict) -> None:
         try:
             kind = node.Type
@@ -196,12 +235,11 @@ class RealEngine(EngineBase):
         except Exception:  # noqa: BLE001
             pass
         out[path] = entry
-        try:
-            for i in range(node.Children.Count):
-                child = node.Children.ElementAt(i)
+        for child in self._iter_children(node):
+            try:
                 self._snapshot(child, child.Id, out)
-        except Exception:  # noqa: BLE001
-            pass
+            except Exception:  # noqa: BLE001
+                continue
 
     def record_start(self, tcode: str, sid: str) -> dict:
         """THE FIX: this used to only note the intended tcode in the step
@@ -233,13 +271,23 @@ class RealEngine(EngineBase):
                         "error": f"Navigation to {tcode.strip()} failed: {exc}. "
                                  "Check the T-code is valid and you have authorization."}
         self._prev_snapshot = {}
+        self._walk_error = None
         try:
             wnd = session.findById("wnd[0]")
             self._snapshot(wnd, "wnd[0]", self._prev_snapshot)
         except Exception as exc:  # noqa: BLE001
             self._recording = False
             return {"ok": False, "error": f"Could not read the SAP GUI screen: {exc}"}
-        return {"ok": True, "message": f"Recording started — {nav_note}"}
+        baseline_count = len(self._prev_snapshot)
+        if self._walk_error:
+            # Baseline capture is broken at a fundamental level — every poll
+            # will keep finding the same near-empty tree, so recording would
+            # silently produce ~0 steps forever with no clue why. Surface it
+            # as a hard failure instead of pretending this is working.
+            self._recording = False
+            return {"ok": False, "error": self._walk_error}
+        return {"ok": True,
+                "message": f"Recording started — {nav_note} ({baseline_count} elements on screen)"}
 
     def record_poll(self) -> list[dict]:
         if not self._recording or self._session is None:
