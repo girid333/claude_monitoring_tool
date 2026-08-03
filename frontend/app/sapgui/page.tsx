@@ -46,6 +46,7 @@ export default function SapGuiSandboxPage() {
   const [flowId, setFlowId] = useState("");
   const [description, setDescription] = useState("");
   const [recording, setRecording] = useState<{ agentId: string; jobId: string } | null>(null);
+  const [recordingStatus, setRecordingStatus] = useState("");
   const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
@@ -91,7 +92,7 @@ export default function SapGuiSandboxPage() {
 
   const startRecording = async () => {
     if (!recordAgentId) return;
-    setBusy(true); setError(""); setSaved(null); setLiveEvents([]);
+    setBusy(true); setError(""); setSaved(null); setLiveEvents([]); setRecordingStatus("");
     try {
       const r = await fetch(`${API}/api/sapgui/record/start`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -106,6 +107,16 @@ export default function SapGuiSandboxPage() {
       es.onmessage = (ev) => {
         const data = JSON.parse(ev.data);
         setLiveEvents(prev => [...prev, data]);
+        // The agent reports connect/navigation failures as kind:"error" right
+        // after Start Recording — surface it prominently instead of leaving
+        // the operator staring at a silent "0 steps" with no explanation.
+        if (data.kind === "error") {
+          setError(`Agent could not start recording: ${data.error || data.message || "unknown error"}`);
+          es.close();
+          setRecording(null);
+        } else if (data.kind === "status") {
+          setRecordingStatus(String(data.message || ""));
+        }
       };
       recordEsRef.current = es;
     } catch (err) {
@@ -284,6 +295,9 @@ export default function SapGuiSandboxPage() {
             <span style={{ fontSize: 12, color: "var(--text-3)" }}>
               {liveEvents.filter(e => e.kind === "step").length} steps
             </span>
+            {recordingStatus && (
+              <span style={{ fontSize: 11.5, color: "var(--green)" }}>{recordingStatus}</span>
+            )}
             <label style={{ fontSize: 12.5, color: "var(--text-2)", marginLeft: 6 }}>Name</label>
             <input className="input" value={flowId} onChange={e => setFlowId(e.target.value)}
                    style={{ width: 180 }} />

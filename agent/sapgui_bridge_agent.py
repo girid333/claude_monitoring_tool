@@ -63,7 +63,10 @@ class EngineBase:
     def probe(self) -> dict:
         raise NotImplementedError
 
-    def record_start(self, tcode: str, sid: str) -> None:
+    def record_start(self, tcode: str, sid: str) -> dict:
+        """Returns {"ok": bool, "message"|"error": str} — the agent sends
+        this back over the socket immediately so the sandbox page shows
+        SOMETHING right away instead of silently sitting at '0 steps'."""
         raise NotImplementedError
 
     def record_poll(self) -> list[dict]:
@@ -96,10 +99,11 @@ class FakeEngine(EngineBase):
         return {"hostname": platform.node(), "username": "fake-user",
                 "sap_gui_version": "FAKE 8.00", "scripting_enabled": True}
 
-    def record_start(self, tcode: str, sid: str) -> None:
+    def record_start(self, tcode: str, sid: str) -> dict:
         self._recording = True
         self._steps = [{"act": "start_tcode", "sid": "wnd[0]/tbar[0]/okcd",
                          "label": "Command field", "value": tcode}]
+        return {"ok": True, "message": f"(fake) navigated to {tcode or '(home screen)'}"}
 
     def record_poll(self) -> list[dict]:
         # A real engine would diff the live control tree here; the fake
@@ -136,9 +140,24 @@ class RealEngine(EngineBase):
 
     def _connect(self):
         import win32com.client  # noqa: PLC0415
-        sap_gui_auto = win32com.client.GetObject("SAPGUI")
+        try:
+            sap_gui_auto = win32com.client.GetObject("SAPGUI")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "Could not reach SAP GUI via GetObject('SAPGUI') — make sure SAP GUI "
+                "for Windows is running, you're logged into a session, and scripting is "
+                "enabled (Options -> Accessibility & Scripting -> Scripting -> Enable "
+                f"scripting). Original error: {exc!r}") from exc
         application = sap_gui_auto.GetScriptingEngine
+        if application.Children.Count == 0:
+            raise RuntimeError(
+                "SAP GUI scripting engine has no open connections — log into a SAP "
+                "system in SAP GUI first, then retry.")
         connection = application.Children(0)
+        if connection.Children.Count == 0:
+            raise RuntimeError(
+                "SAP GUI connection has no open sessions — open a session (log in) "
+                "in SAP GUI first, then retry.")
         session = connection.Children(0)
         return session
 
@@ -147,15 +166,21 @@ class RealEngine(EngineBase):
             session = self._connect()
             self._session = session
             info = session.Info
+            version = ""
+            try:
+                app = session.Parent.Parent  # session -> connection -> application
+                version = f"{app.MajorVersion}.{app.MinorVersion}.{app.PatchLevel}"
+            except Exception:  # noqa: BLE001 - cosmetic only, never blocks a real connection
+                version = "connected (version unknown)"
             return {
                 "hostname": platform.node(),
                 "username": getattr(info, "User", ""),
-                "sap_gui_version": getattr(info, "GuiVersion", "unknown"),
+                "sap_gui_version": version,
                 "scripting_enabled": True,
             }
         except Exception as exc:  # noqa: BLE001 - report, don't crash the agent
             return {"hostname": platform.node(), "username": "", "sap_gui_version": "",
-                     "scripting_enabled": False, "error": repr(exc)}
+                     "scripting_enabled": False, "error": str(exc)}
 
     def _snapshot(self, node, path: str, out: dict) -> None:
         try:
@@ -178,18 +203,43 @@ class RealEngine(EngineBase):
         except Exception:  # noqa: BLE001
             pass
 
-    def record_start(self, tcode: str, sid: str) -> None:
-        session = self._session or self._connect()
+    def record_start(self, tcode: str, sid: str) -> dict:
+        """THE FIX: this used to only note the intended tcode in the step
+        list without ever actually sending it to SAP GUI — recording
+        silently did nothing because the screen never moved and nothing
+        the user did afterward matched what they were looking at. Now it
+        actually types into the OK-code field and presses Enter, exactly
+        like the WebGUI recorder's own tcode-start behavior, THEN takes
+        the baseline snapshot once the new screen has settled."""
+        try:
+            session = self._session or self._connect()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Could not connect to SAP GUI: {exc}"}
         self._session = session
         self._recording = True
-        self._steps = [{"act": "start_tcode", "sid": "wnd[0]/tbar[0]/okcd",
-                         "label": "Command field", "value": tcode}]
+        self._steps = []
+        nav_note = "(stayed on current screen — no T-code given)"
+        if tcode.strip():
+            self._steps.append({"act": "start_tcode", "sid": "wnd[0]/tbar[0]/okcd",
+                                 "label": "Command field", "value": tcode.strip()})
+            try:
+                session.findById("wnd[0]/tbar[0]/okcd").text = f"/n{tcode.strip()}"
+                session.findById("wnd[0]").sendVKey(0)
+                time.sleep(0.8)  # let the new screen finish rendering before baselining it
+                nav_note = f"navigated to {tcode.strip()}"
+            except Exception as exc:  # noqa: BLE001
+                self._recording = False
+                return {"ok": False,
+                        "error": f"Navigation to {tcode.strip()} failed: {exc}. "
+                                 "Check the T-code is valid and you have authorization."}
         self._prev_snapshot = {}
         try:
             wnd = session.findById("wnd[0]")
             self._snapshot(wnd, "wnd[0]", self._prev_snapshot)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            self._recording = False
+            return {"ok": False, "error": f"Could not read the SAP GUI screen: {exc}"}
+        return {"ok": True, "message": f"Recording started — {nav_note}"}
 
     def record_poll(self) -> list[dict]:
         if not self._recording or self._session is None:
@@ -287,8 +337,18 @@ async def run_agent(server: str, code: str, use_fake: bool) -> None:
                 job_id = job.get("job_id")
                 if kind == "record_start":
                     active_job = job_id
-                    engine.record_start(job.get("tcode", ""), job.get("sid", ""))
-                    poll_task = asyncio.create_task(poll_loop(job_id))
+                    try:
+                        result = engine.record_start(job.get("tcode", ""), job.get("sid", ""))
+                    except Exception as exc:  # noqa: BLE001 - never let a bad job kill the agent
+                        result = {"ok": False, "error": f"record_start crashed: {exc}"}
+                    if result.get("ok"):
+                        await ws.send(json.dumps({"kind": "status", "job_id": job_id,
+                                                   "message": result.get("message", "")}))
+                        poll_task = asyncio.create_task(poll_loop(job_id))
+                    else:
+                        await ws.send(json.dumps({"kind": "error", "job_id": job_id,
+                                                   "error": result.get("error", "unknown error")}))
+                        active_job = None
                 elif kind == "record_stop":
                     if poll_task:
                         poll_task.cancel()
