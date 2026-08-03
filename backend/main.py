@@ -23,6 +23,13 @@ Endpoints:
   POST /api/recorder/stop                 {recording_id, flow_id} -> save flows/{flow_id}.json
   POST /api/recorder/cancel               {recording_id} -> discard, close the browser
 
+  -- D-044 SANDBOX (SAP GUI bridge agent) — see engine/agent_hub.py for the
+     full surface (/api/sapgui/pair/start, /api/sapgui/agent/ws,
+     /api/sapgui/record/*, /api/sapgui/replay, /api/sapgui/flows/*).
+     Isolated from everything above: separate module, separate flow
+     storage dir, mounted with one include_router() call. Not merged into
+     the Landscape/Runs/Reports pipeline above.
+
 Design notes:
   - SSE (not the v1 2s global poll): the Dynamic Island subscribes here.
   - Runs execute sequentially per system for now; the event bus and store
@@ -83,6 +90,13 @@ _cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",
 app = FastAPI(title="Claude Monitoring Tool")
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_methods=["*"], allow_headers=["*"])
+
+# D-044 (SANDBOX): SAP GUI bridge-agent record/replay lives entirely in its
+# own module (engine/agent_hub.py) with its own routes, state, and flow
+# storage directory — mounted here as the one and only touch point. Nothing
+# above or below this line changes because of it.
+from engine.agent_hub import router as sapgui_router  # noqa: E402
+app.include_router(sapgui_router)
 
 store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}

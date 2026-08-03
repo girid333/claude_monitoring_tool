@@ -1,7 +1,29 @@
 # SAP GUI Bridge Agent — Architecture Plan (D-044)
 
-Status: **PROPOSED — awaiting Giri's review.** Nothing in this document is
-built yet. WebGUI record/replay (the existing engine) is unaffected.
+Status: **SANDBOX BUILT (Phase A + agent skeleton).** Per Giri's explicit
+instruction, this shipped as an isolated, additive section — a new "SAP
+GUI (sandbox)" page, a new backend module (`engine/agent_hub.py`) mounted
+with one `include_router()` line, and a separate flow storage directory
+(`flows_sapgui/`). It is **not merged** into the existing WebGUI/Core
+BASIS pipeline described in §4.4 below, and that section's "reuse the same
+flow library/pipeline/reports" framing is **superseded** — merging is a
+future decision, contingent on the sandbox proving useful. WebGUI
+record/replay and Core BASIS are untouched: verified by a full re-run of
+every existing E2E suite after this work (see SKILL.md D-044 entry).
+
+What's real vs. best-effort, concretely:
+- Agent Hub protocol (pairing, WebSocket registry, job dispatch, SSE
+  fan-out, flow storage, replay-time overrides): built and proven with a
+  real running server + a fake agent (`agent/sapgui_bridge_agent.py
+  --fake`) — `backend/e2e/test_sapgui_agent_hub.py`, 18/18 checks.
+- Real COM connect/pair/probe and REPLAY (`findById`, `.press()`,
+  `.selected`, `.sendVKey`, `HardCopy`): implemented using standard,
+  documented SAP GUI Scripting API members — confident in the approach,
+  unverified against a real session (needs Giri's workstation).
+- Real RECORD: SAP GUI Scripting has no public "subscribe to user
+  actions" event stream, so the agent polls the active window's control
+  tree and diffs it. Workable, but will need tuning against real screens —
+  treat as a first cut, not finished.
 
 ---
 
