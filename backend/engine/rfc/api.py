@@ -64,6 +64,13 @@ class RunRfcRequest(BaseModel):
     check_ids: Optional[list[str]] = None
 
 
+class RawCallRequest(BaseModel):
+    sid: str
+    function: str
+    params: dict = {}
+    include_xml: bool = True
+
+
 @router.get("/checks")
 def list_checks() -> list[dict]:
     return describe_checks()
@@ -89,6 +96,34 @@ def test_connection(req: SidRequest) -> dict:
         "system": sysinfo.get("RFCSYSID", ""), "host": sysinfo.get("RFCHOST", ""),
         "release": sysinfo.get("RFCSAPRL", ""), "database": sysinfo.get("RFCDBSYS", ""),
         "kernel": sysinfo.get("RFCKERNRL", ""), "os": sysinfo.get("RFCOPSYS", ""),
+    }
+
+
+@router.post("/raw")
+def raw_call(req: RawCallRequest) -> dict:
+    """Call ANY RFC-enabled function module and see exactly what comes back.
+
+    This is the diagnostic that stops field names being guesswork. When a
+    check "succeeds" with zero rows, the question is always "what did SAP
+    actually return?" — `top_level_keys` and `table_sizes` answer it in one
+    look, and the raw XML is there when they don't.
+
+    It doubles as the fastest way to wire up a custom Z_* remote-enabled
+    FM: call it here, see the shape, then add a declarative entry."""
+    client = _client_for(req.sid)
+    try:
+        parsed, raw = client.call_raw(req.function, **(req.params or {}))
+    except RfcSoapError as exc:
+        return {"ok": False, "function": req.function, "error": exc.message,
+                "error_kind": exc.kind, "detail": exc.detail}
+    table_sizes = {k: len(v) for k, v in parsed.items() if isinstance(v, list)}
+    return {
+        "ok": True,
+        "function": req.function,
+        "top_level_keys": sorted(parsed.keys()),
+        "table_sizes": table_sizes,
+        "parsed": parsed,
+        "raw_xml": raw.decode("utf-8", "replace")[:20000] if req.include_xml else None,
     }
 
 

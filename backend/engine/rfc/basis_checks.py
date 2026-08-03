@@ -36,12 +36,14 @@ class CheckResult:
     error: str = ""
     error_kind: str = ""
     function: str = ""
+    suspicious: str = ""   # succeeded, but the result looks wrong (see RfcCheck.expects_rows)
 
     def as_dict(self) -> dict:
         return {
             "check_id": self.check_id, "title": self.title, "ok": self.ok,
             "rows": self.rows, "anomalies": self.anomalies, "summary": self.summary,
             "error": self.error, "error_kind": self.error_kind, "function": self.function,
+            "suspicious": self.suspicious,
         }
 
 
@@ -55,6 +57,11 @@ class RfcCheck:
     interpret: Optional[Callable[[dict], tuple[list[dict], list[str], str]]] = None
     confidence: str = "verified"  # verified | unverified
     note: str = ""
+    # A healthy system ALWAYS has work processes, servers and jobs. If such a
+    # check returns nothing, that is a parsing/permission problem masquerading
+    # as success — the exact failure the first live F4H run produced. Flag it
+    # instead of rendering a reassuring empty table.
+    expects_rows: bool = True
 
     def run(self, client: RfcSoapClient) -> CheckResult:
         try:
@@ -73,8 +80,17 @@ class RfcCheck:
             return CheckResult(self.check_id, self.title, ok=False,
                                 error=f"could not interpret the reply: {exc!r}",
                                 error_kind="parse", function=self.function)
+        suspicious = ""
+        if self.expects_rows and not rows:
+            suspicious = (
+                f"{self.function} returned no rows. A live system should always report "
+                f"something here, so this is most likely a parameter/field-name mismatch "
+                f"on this release, or missing authorization — not a genuinely empty "
+                f"result. Use POST /api/rfc/raw with function={self.function} to see "
+                f"exactly what SAP returned.")
         return CheckResult(self.check_id, self.title, ok=True, rows=rows,
-                            anomalies=anomalies, summary=summary, function=self.function)
+                            anomalies=anomalies, summary=summary, function=self.function,
+                            suspicious=suspicious)
 
 
 def _as_rows(value: Any) -> list[dict]:
@@ -100,6 +116,31 @@ def _generic_rows(reply: dict) -> list[dict]:
     return best or [reply]
 
 
+def _first_table(reply: dict, *preferred_names: str) -> list[dict]:
+    """Find a check's data table by NAME first, then fall back to the
+    largest table-shaped value anywhere in the reply.
+
+    Rationale (learned from the first live run on F4H, release 758):
+    export/table parameter names differ between releases, so hard-coding
+    one name made TH_WPINFO and TH_SERVER_LIST report "succeeded, 0 rows"
+    on a system that obviously has work processes and servers. Falling
+    back to "whatever table actually came back" makes the check work
+    across releases instead of silently returning nothing."""
+    for name in preferred_names:
+        if name in reply:
+            rows = _as_rows(reply[name])
+            if rows:
+                return rows
+    best: list[dict] = []
+    for key, value in reply.items():
+        if key.upper() in ("RETURN", "RFCSI_EXPORT"):   # status blocks, not data
+            continue
+        rows = _as_rows(value) if isinstance(value, list) else []
+        if len(rows) > len(best):
+            best = rows
+    return best
+
+
 # ── Interpreters ─────────────────────────────────────────────────────────
 
 def _interpret_system_info(reply: dict) -> tuple[list[dict], list[str], str]:
@@ -118,7 +159,7 @@ def _interpret_system_info(reply: dict) -> tuple[list[dict], list[str], str]:
 def _interpret_wpinfo(reply: dict) -> tuple[list[dict], list[str], str]:
     """SM50 — work processes. Anomalies: stopped/ended processes, and any
     long-running or PRIV-mode process (classic memory-leak symptom)."""
-    rows = _as_rows(reply.get("WPLIST"))
+    rows = _first_table(reply, "WPLIST", "WP_TABLE", "WPTAB")
     out, anomalies = [], []
     for r in rows:
         status = (r.get("WP_STATUS") or "").strip()
@@ -144,7 +185,7 @@ def _interpret_wpinfo(reply: dict) -> tuple[list[dict], list[str], str]:
 
 def _interpret_server_list(reply: dict) -> tuple[list[dict], list[str], str]:
     """SM51 — active application servers."""
-    rows = _as_rows(reply.get("SERVER_LIST") or reply.get("SERVERS"))
+    rows = _first_table(reply, "SERVER_LIST", "SERVERS", "SERVER_TAB", "LIST")
     out = [{
         "Server": (r.get("NAME") or r.get("SERVERNAME") or "").strip(),
         "Host": (r.get("HOST") or "").strip(),
@@ -156,7 +197,7 @@ def _interpret_server_list(reply: dict) -> tuple[list[dict], list[str], str]:
 def _interpret_xbp_jobs(reply: dict) -> tuple[list[dict], list[str], str]:
     """SM37 — background jobs. Anomalies: cancelled (status A) jobs, which
     is exactly the check the SM37 WebGUI recording was built for."""
-    rows = _as_rows(reply.get("JOB_HEAD") or reply.get("SELECTED_JOBS"))
+    rows = _first_table(reply, "SELECTED_JOBS", "JOB_HEAD", "JOBLIST")
     out, anomalies = [], []
     status_names = {"A": "Cancelled", "F": "Finished", "R": "Running",
                      "S": "Released", "P": "Scheduled", "Y": "Ready"}
@@ -169,6 +210,24 @@ def _interpret_xbp_jobs(reply: dict) -> tuple[list[dict], list[str], str]:
             "Start date": (r.get("STRTDATE") or "").strip(),
             "Start time": (r.get("STRTTIME") or "").strip(),
         })
+        if raw == "A":
+            anomalies.append(f"Job {name} is CANCELLED")
+    return out, anomalies, f"{len(out)} job(s); {len(anomalies)} cancelled"
+
+
+def _interpret_job_table(reply: dict) -> tuple[list[dict], list[str], str]:
+    """SM37 straight from TBTCO (transparent), independent of XBP."""
+    rows, _, _ = _interpret_read_table(reply)
+    status_names = {"A": "Cancelled", "F": "Finished", "R": "Running",
+                     "S": "Released", "P": "Scheduled", "Y": "Ready"}
+    out, anomalies = [], []
+    for r in rows:
+        raw = (r.get("STATUS") or "").strip().upper()
+        name = (r.get("JOBNAME") or "").strip()
+        out.append({"Job": name, "Status": status_names.get(raw, raw or "?"),
+                     "User": (r.get("SDLUNAME") or "").strip(),
+                     "Start date": (r.get("STRTDATE") or "").strip(),
+                     "Start time": (r.get("STRTTIME") or "").strip()})
         if raw == "A":
             anomalies.append(f"Job {name} is CANCELLED")
     return out, anomalies, f"{len(out)} job(s); {len(anomalies)} cancelled"
@@ -210,16 +269,25 @@ CHECKS: list[RfcCheck] = [
         note="Returns the instance list; table parameter name differs across releases "
              "(SERVER_LIST vs SERVERS) — both are handled.",
     ),
+    # NOTE (live finding, F4H rel 758): the original ST22 check queried
+    # SNAP and failed with TABLE_NOT_AVAILABLE. That is not a permissions
+    # problem and not fixable by retrying — SNAP is a CLUSTER table, and
+    # RFC_READ_TABLE can only read transparent (database-visible) tables.
+    # Reading short dumps over RFC needs a different mechanism entirely
+    # (see OQ-20); rather than ship a check that can never work, this slot
+    # now holds a genuinely useful transparent-table check.
     RfcCheck(
-        check_id="short_dumps", title="ABAP short dumps (today)", tcode="ST22",
+        check_id="job_table", title="Background jobs (table read)", tcode="SM37",
         function="RFC_READ_TABLE",
-        params={"QUERY_TABLE": "SNAP", "DELIMITER": "",
-                "FIELDS": [{"FIELDNAME": "DATUM"}, {"FIELDNAME": "UZEIT"},
-                            {"FIELDNAME": "UNAME"}, {"FIELDNAME": "AHOST"}],
+        params={"QUERY_TABLE": "TBTCO", "DELIMITER": "",
+                "FIELDS": [{"FIELDNAME": "JOBNAME"}, {"FIELDNAME": "SDLUNAME"},
+                            {"FIELDNAME": "STATUS"}, {"FIELDNAME": "STRTDATE"},
+                            {"FIELDNAME": "STRTTIME"}],
                 "ROWCOUNT": 200},
-        interpret=_interpret_read_table, confidence="unverified",
-        note="RFC_READ_TABLE is universally available but often restricted by S_TABU_* "
-             "authorization; SNAP can also be large, hence ROWCOUNT.",
+        interpret=_interpret_job_table, confidence="verified",
+        note="TBTCO is the transparent table behind SM37, so this works via "
+             "RFC_READ_TABLE and doubles as a fallback if the XBP interface "
+             "is unavailable. Needs S_TABU_* authorization for TBTCO.",
     ),
 ]
 
@@ -248,8 +316,16 @@ def run_job_check(client: RfcSoapClient, max_jobs: int = 200) -> CheckResult:
                                                 "SCHEDUL": "X", "RELEASED": "X"},
                              MAX_SELECT=max_jobs)
         rows, anomalies, summary = _interpret_xbp_jobs(reply)
+        suspicious = ""
+        if not rows:
+            suspicious = (
+                "XBP returned no jobs. Most likely the XMI session did not carry over "
+                "to this call, or the selection parameters are too narrow for this "
+                "release. The 'Background jobs (table read)' check reads TBTCO directly "
+                "and does not depend on XBP — compare the two.")
         return CheckResult(check_id, title, ok=True, rows=rows, anomalies=anomalies,
-                            summary=summary, function="BAPI_XBP_JOB_SELECT")
+                            summary=summary, function="BAPI_XBP_JOB_SELECT",
+                            suspicious=suspicious)
     except RfcSoapError as exc:
         return CheckResult(check_id, title, ok=False, error=exc.message,
                             error_kind=exc.kind, function="BAPI_XBP_JOB_SELECT")

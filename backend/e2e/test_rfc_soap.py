@@ -122,10 +122,13 @@ try:
           any("Z_FAILED_LOAD" in a and "CANCELLED" in a for a in jobs.anomalies), jobs.anomalies)
 
     # ---- 14. RFC_READ_TABLE fixed-width split into named columns ----
-    dumps = next(c for c in basis_checks.CHECKS if c.check_id == "short_dumps").run(client)
+    jt = next(c for c in basis_checks.CHECKS if c.check_id == "job_table").run(client)
     check("14. RFC_READ_TABLE fixed-width rows split into named columns",
-          dumps.ok and len(dumps.rows) == 2 and dumps.rows[0]["UNAME"] == "GIRID",
-          f"ok={dumps.ok} rows={dumps.rows} err={dumps.error}")
+          jt.ok and len(jt.rows) == 2 and jt.rows[0]["Job"] == "NIGHTLY_BATCH"
+          and jt.rows[0]["User"] == "GIRID",
+          f"ok={jt.ok} rows={jt.rows} err={jt.error}")
+    check("14b. TBTCO job-table check flags the CANCELLED job too (XBP-independent)",
+          any("Z_FAILED_LOAD" in a and "CANCELLED" in a for a in jt.anomalies), jt.anomalies)
 
     # ---- 15-16. run_all: isolation + no silent success ----
     results = basis_checks.run_all(client)
@@ -148,6 +151,44 @@ try:
     check("18. describe_checks() exposes tcode/function/confidence for each",
           all(d.get("tcode") and d.get("function") and d.get("confidence") for d in described),
           described)
+
+    # ---- 19-21. THE LIVE-F4H BUGS, reproduced and fixed ----
+    # 19: table arriving under a different name (release variation) must
+    #     still be found, instead of "succeeded, 0 rows".
+    alt = basis_checks._first_table(client.call("TH_WPINFO_ALT"), "WPLIST")
+    check("19. Table under an UNEXPECTED name is still found (no silent 0 rows)",
+          len(alt) == 2, alt)
+
+    # 20: SNAP is a cluster table -> RFC_READ_TABLE genuinely can't read it.
+    #     Must surface as a real failure, and no shipped check may use it.
+    try:
+        client.call("RFC_READ_TABLE", QUERY_TABLE="SNAP")
+        check("20. SNAP cluster-table read fails loudly", False, "no error raised")
+    except RfcSoapError as exc:
+        check("20. SNAP cluster-table read fails loudly",
+              "TABLE_NOT_AVAILABLE" in exc.message, exc.message)
+    check("21. No shipped check queries the unreadable SNAP table",
+          all(c.params.get("QUERY_TABLE") != "SNAP" for c in basis_checks.CHECKS),
+          [c.params.get("QUERY_TABLE") for c in basis_checks.CHECKS])
+
+    # ---- 22. zero rows where rows are expected is FLAGGED, not silent ----
+    class _Empty:
+        def call(self, fn, **kw):
+            return {"WPLIST": []}
+    empty = basis_checks.RfcCheck(
+        check_id="t", title="t", tcode="SM50", function="TH_WPINFO",
+        interpret=basis_checks._interpret_wpinfo).run(_Empty())
+    check("22. Succeeded-but-empty is flagged as suspicious, not clean",
+          empty.ok and empty.suspicious and "no rows" in empty.suspicious, empty.as_dict())
+
+    # ---- 23. session/cookies persist across calls (XBP needs this) ----
+    check("23. Client reuses ONE HTTP session (cookie jar for XBP/XMI state)",
+          hasattr(client, "_http") and client._http is not None)
+
+    # ---- 24. raw diagnostic returns the actual shape ----
+    parsed, rawxml = client.call_raw("TH_WPINFO")
+    check("24. call_raw() exposes parsed keys AND raw XML for diagnosis",
+          "WPLIST" in parsed and b"WPLIST" in rawxml, sorted(parsed.keys()))
 
 finally:
     srv.terminate()

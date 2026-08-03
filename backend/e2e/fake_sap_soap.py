@@ -102,19 +102,26 @@ XMI_LOGOFF = """<?xml version="1.0" encoding="utf-8"?>
 </soap-env:Body>
 </soap-env:Envelope>"""
 
-# RFC_READ_TABLE: fixed-width rows + FIELDS offsets, as the real FM returns.
+# RFC_READ_TABLE against TBTCO (the transparent table behind SM37):
+# fixed-width rows + FIELDS offsets, exactly as the real FM returns.
+# Layout: JOBNAME(0,32) SDLUNAME(32,12) STATUS(44,1) STRTDATE(45,8) STRTTIME(53,6)
+_ROW1 = "NIGHTLY_BATCH".ljust(32) + "GIRID".ljust(12) + "F" + "20260803" + "020000"
+_ROW2 = "Z_FAILED_LOAD".ljust(32) + "BATCHUSR".ljust(12) + "A" + "20260803" + "031500"
+
 READ_TABLE = """<?xml version="1.0" encoding="utf-8"?>
 <soap-env:Envelope xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/">
 <soap-env:Body>
 <rfc:RFC_READ_TABLE.Response xmlns:rfc="urn:sap-com:document:sap:rfc:functions">
 <FIELDS>
-<item><FIELDNAME>DATUM</FIELDNAME><OFFSET>0</OFFSET><LENGTH>8</LENGTH></item>
-<item><FIELDNAME>UZEIT</FIELDNAME><OFFSET>8</OFFSET><LENGTH>6</LENGTH></item>
-<item><FIELDNAME>UNAME</FIELDNAME><OFFSET>14</OFFSET><LENGTH>12</LENGTH></item>
+<item><FIELDNAME>JOBNAME</FIELDNAME><OFFSET>0</OFFSET><LENGTH>32</LENGTH></item>
+<item><FIELDNAME>SDLUNAME</FIELDNAME><OFFSET>32</OFFSET><LENGTH>12</LENGTH></item>
+<item><FIELDNAME>STATUS</FIELDNAME><OFFSET>44</OFFSET><LENGTH>1</LENGTH></item>
+<item><FIELDNAME>STRTDATE</FIELDNAME><OFFSET>45</OFFSET><LENGTH>8</LENGTH></item>
+<item><FIELDNAME>STRTTIME</FIELDNAME><OFFSET>53</OFFSET><LENGTH>6</LENGTH></item>
 </FIELDS>
 <DATA>
-<item><WA>20260803091500GIRID       </WA></item>
-<item><WA>20260803104200BATCHUSR    </WA></item>
+<item><WA>""" + _ROW1 + """</WA></item>
+<item><WA>""" + _ROW2 + """</WA></item>
 </DATA>
 </rfc:RFC_READ_TABLE.Response>
 </soap-env:Body>
@@ -131,8 +138,41 @@ FAULT = """<?xml version="1.0" encoding="utf-8"?>
 </soap-env:Body>
 </soap-env:Envelope>"""
 
+# Reproduces the exact live-F4H failure: the FM answers successfully but
+# the table arrives under a DIFFERENT name than the one we hard-coded
+# (release variation). A name-keyed parser silently reports zero rows here;
+# _first_table()'s fallback must still find the data.
+WPINFO_ALT_NAME = """<?xml version="1.0" encoding="utf-8"?>
+<soap-env:Envelope xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/">
+<soap-env:Body>
+<rfc:TH_WPINFO_ALT.Response xmlns:rfc="urn:sap-com:document:sap:rfc:functions">
+<WP_TABLE>
+<item><WP_INDEX>0</WP_INDEX><WP_TYP>DIA</WP_TYP><WP_PID>4001</WP_PID>
+<WP_STATUS>running</WP_STATUS><WP_BNAME>GIRID</WP_BNAME><WP_REPORT>SAPMSSY1</WP_REPORT>
+<WP_ELTIME>1</WP_ELTIME><WP_IPRIV> </WP_IPRIV><WP_WAITING></WP_WAITING></item>
+<item><WP_INDEX>1</WP_INDEX><WP_TYP>BTC</WP_TYP><WP_PID>4002</WP_PID>
+<WP_STATUS>stopped</WP_STATUS><WP_BNAME></WP_BNAME><WP_REPORT></WP_REPORT>
+<WP_ELTIME>0</WP_ELTIME><WP_IPRIV> </WP_IPRIV><WP_WAITING>PRIV</WP_WAITING></item>
+</WP_TABLE>
+</rfc:TH_WPINFO_ALT.Response>
+</soap-env:Body>
+</soap-env:Envelope>"""
+
+# SNAP is a CLUSTER table — RFC_READ_TABLE genuinely cannot read it, and a
+# real system answers with this fault (observed live on F4H).
+TABLE_NOT_AVAILABLE = """<?xml version="1.0" encoding="utf-8"?>
+<soap-env:Envelope xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/">
+<soap-env:Body>
+<soap-env:Fault>
+<faultcode>SOAP-ENV:Server</faultcode>
+<faultstring>TABLE_NOT_AVAILABLE</faultstring>
+</soap-env:Fault>
+</soap-env:Body>
+</soap-env:Envelope>"""
+
 RESPONSES = {
-    "RFC_SYSTEM_INFO": SYSTEM_INFO, "TH_WPINFO": WPINFO,
+    "RFC_SYSTEM_INFO": SYSTEM_INFO, "TH_WPINFO_ALT": WPINFO_ALT_NAME,
+    "TH_WPINFO": WPINFO,
     "TH_SERVER_LIST": SERVER_LIST, "BAPI_XMI_LOGON": XMI_LOGON,
     "BAPI_XBP_JOB_SELECT": JOB_SELECT, "BAPI_XMI_LOGOFF": XMI_LOGOFF,
     "RFC_READ_TABLE": READ_TABLE,
@@ -167,6 +207,10 @@ class H(BaseHTTPRequestHandler):
             return
 
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+        # SNAP via RFC_READ_TABLE must fault exactly as a real system does.
+        if "RFC_READ_TABLE" in body and "SNAP" in body:
+            self._send(TABLE_NOT_AVAILABLE, 500)
+            return
         for name, xml in RESPONSES.items():
             if name in body:
                 self._send(xml)

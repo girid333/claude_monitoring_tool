@@ -97,6 +97,19 @@ try:
           len(r.json()["checks"]) == 1 and r.json()["checks"][0]["check_id"] == "system_info",
           r.json()["checks"])
 
+    # ---- raw diagnostic: the endpoint that ends field-name guesswork ----
+    r = c.post("/api/rfc/raw", json={"sid": "F4H", "function": "TH_WPINFO"})
+    body = r.json()
+    check("12b. POST /api/rfc/raw returns the ACTUAL response shape",
+          r.status_code == 200 and body["ok"] and "WPLIST" in body["top_level_keys"],
+          body if r.status_code != 200 else body.get("top_level_keys"))
+    check("12c. raw reports table sizes and raw XML for diagnosis",
+          body["table_sizes"].get("WPLIST") == 3 and "WPLIST" in (body.get("raw_xml") or ""),
+          body.get("table_sizes"))
+    r = c.post("/api/rfc/raw", json={"sid": "F4H", "function": "Z_NO_SUCH_FM"})
+    check("12d. raw surfaces SAP's fault instead of throwing",
+          r.status_code == 200 and not r.json()["ok"] and r.json()["error"], r.text[:200])
+
     # ---- isolation: existing surfaces unaffected by mounting this router ----
     check("13. ISOLATION: existing /api/flows still works",
           c.get("/api/flows").status_code == 200)

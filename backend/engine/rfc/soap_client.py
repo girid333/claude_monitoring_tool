@@ -182,9 +182,38 @@ class RfcTarget:
 
 
 class RfcSoapClient:
+    """Holds ONE httpx.Client for its lifetime.
+
+    That is not an optimization — it is required for correctness. SAP's
+    SOAP RFC service is stateless per HTTP connection unless the session
+    cookie (MYSAPSSO2 / SAP_SESSIONID_*) is carried forward. Interfaces
+    that establish state with an opening call — XBP is the one that bit
+    us: BAPI_XMI_LOGON must precede BAPI_XBP_JOB_SELECT *in the same
+    session* — silently return nothing when each call gets a fresh
+    session. A one-shot `httpx.post()` per call has no cookie jar, which
+    is exactly why the first live run reported "0 jobs" on a system that
+    definitely has jobs.
+    """
+
     def __init__(self, target: RfcTarget, timeout_s: float = 30.0) -> None:
         self.target = target
         self.timeout_s = timeout_s
+        self._http = httpx.Client(
+            auth=(target.username, target.password),
+            timeout=timeout_s,
+            verify=target.verify_tls,
+            follow_redirects=True,
+            trust_env=False,   # never route SAP calls through an ambient proxy
+        )
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> "RfcSoapClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     @classmethod
     def from_system(cls, webgui_url: str, client: str, username: str,
@@ -193,20 +222,26 @@ class RfcSoapClient:
                               password=password, client=client), **kw)
 
     def call(self, function: str, **params: Any) -> dict[str, Any]:
+        return self.call_raw(function, **params)[0]
+
+    def call_raw(self, function: str, **params: Any) -> tuple[dict[str, Any], bytes]:
+        """Same as call(), but also returns the raw response body.
+
+        This exists to end guesswork. Export/table parameter names vary by
+        release, and inferring them from documentation produced checks that
+        "succeeded" with zero rows on Giri's live system. Being able to see
+        what SAP actually sent back turns that into a five-second fix — the
+        same role the flow step viewer (D-041) played for the WebGUI engine.
+        """
         body = build_envelope(function, params)
         url = self.target.soap_url
         try:
-            resp = httpx.post(
+            resp = self._http.post(
                 url,
                 content=body,
                 params={"sap-client": self.target.client},
                 headers={"Content-Type": 'text/xml; charset="utf-8"',
                          "SOAPAction": '""'},
-                auth=(self.target.username, self.target.password),
-                timeout=self.timeout_s,
-                verify=self.target.verify_tls,
-                follow_redirects=True,
-                trust_env=False,   # never route SAP calls through an ambient proxy
             )
         except httpx.RequestError as exc:
             raise RfcSoapError(
@@ -232,7 +267,7 @@ class RfcSoapClient:
                 f"{function}: HTTP {resp.status_code} from {url}",
                 kind="transport", detail=resp.text[:400], function=function)
 
-        return parse_response(resp.content, function)
+        return parse_response(resp.content, function), resp.content
 
     def ping(self) -> dict[str, Any]:
         """Connection test. RFC_SYSTEM_INFO is present on every ABAP system

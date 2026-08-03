@@ -26,6 +26,7 @@ type CheckResult = {
   check_id: string; title: string; ok: boolean;
   rows: Record<string, string>[]; anomalies: string[];
   summary: string; error: string; error_kind: string; function: string;
+  suspicious?: string;
 };
 type Conn = {
   ok: boolean; sid: string; endpoint: string; system?: string; host?: string;
@@ -216,7 +217,9 @@ export default function RfcPage() {
       {results.map(r => (
         <div key={r.check_id} className="panel" style={{
           padding: "14px 18px", marginBottom: 14, borderRadius: 14,
-          borderLeft: `3px solid ${r.ok ? (r.anomalies.length ? "var(--red)" : "var(--green)") : "var(--red)"}`,
+          borderLeft: `3px solid ${!r.ok ? "var(--red)"
+            : r.anomalies.length ? "var(--red)"
+            : r.suspicious ? "var(--orange,#FF9F0A)" : "var(--green)"}`,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <span style={{ fontSize: 13.5, fontWeight: 600 }}>{r.title}</span>
@@ -270,7 +273,18 @@ export default function RfcPage() {
             </div>
           )}
 
-          {r.ok && r.rows.length === 0 && (
+          {/* A call that succeeds but returns nothing is NOT reassuring — for
+              these checks it almost always means we parsed the wrong field or
+              lack authorization. Say so plainly. */}
+          {r.ok && r.suspicious && (
+            <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8,
+                           background: "rgba(255,159,10,.12)",
+                           color: "var(--orange,#FF9F0A)", fontSize: 12 }}>
+              ⚠ {r.suspicious}
+            </div>
+          )}
+
+          {r.ok && !r.suspicious && r.rows.length === 0 && (
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-3)" }}>
               Call succeeded and returned no rows.
             </div>
