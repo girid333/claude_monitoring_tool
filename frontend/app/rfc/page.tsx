@@ -28,6 +28,11 @@ type CheckResult = {
   summary: string; error: string; error_kind: string; function: string;
   suspicious?: string;
 };
+type DiagResult = {
+  ok: boolean; function: string;
+  top_level_keys?: string[]; table_sizes?: Record<string, number>;
+  raw_xml?: string | null; error?: string; error_kind?: string;
+};
 type Conn = {
   ok: boolean; sid: string; endpoint: string; system?: string; host?: string;
   release?: string; database?: string; kernel?: string; os?: string;
@@ -44,6 +49,14 @@ export default function RfcPage() {
   const [anomalyCount, setAnomalyCount] = useState(0);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+
+  // Diagnostic panel (D-045e). Exists so nobody has to reach for Swagger or
+  // curl: when a check comes back empty, the question is always "what did SAP
+  // actually return?", and that must be answerable from this page.
+  const [diagFn, setDiagFn] = useState("TH_SERVER_LIST");
+  const [diagTables, setDiagTables] = useState("SERVER_LIST");
+  const [diag, setDiag] = useState<DiagResult | null>(null);
+  const [showXml, setShowXml] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/api/systems`).then(r => r.json()).then((s: SystemRow[]) => {
@@ -83,6 +96,22 @@ export default function RfcPage() {
       if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
       setResults(j.checks || []);
       setAnomalyCount(j.anomaly_count || 0);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally { setBusy(""); }
+  };
+
+  const runDiagnose = async () => {
+    setBusy("diag"); setError(""); setDiag(null); setShowXml(false);
+    try {
+      const tables = diagTables.split(",").map(t => t.trim()).filter(Boolean);
+      const r = await fetch(`${API}/api/rfc/raw`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sid, function: diagFn.trim().toUpperCase(), tables }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      setDiag(j);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally { setBusy(""); }
@@ -291,6 +320,90 @@ export default function RfcPage() {
           )}
         </div>
       ))}
+
+      {/* ── Diagnostic panel ─────────────────────────────────────────── */}
+      <div className="panel" style={{ padding: "14px 18px", marginTop: 20, borderRadius: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+          Diagnose a function module
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--text-3)", marginBottom: 10 }}>
+          Calls any RFC-enabled function module and shows exactly what SAP returned.
+          SAP only sends back a table you explicitly ask for, so if a check is empty,
+          the usual cause is the table having a different name on this release — the
+          key list below tells you the real one. Also the quickest way to check one of
+          your own Z_* modules.
+        </div>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ fontSize: 12.5, color: "var(--text-2)" }}>Function</label>
+          <input className="input" value={diagFn}
+                 onChange={e => setDiagFn(e.target.value.toUpperCase())}
+                 style={{ width: 230 }} placeholder="TH_SERVER_LIST" />
+          <label style={{ fontSize: 12.5, color: "var(--text-2)" }}>Tables</label>
+          <input className="input" value={diagTables}
+                 onChange={e => setDiagTables(e.target.value.toUpperCase())}
+                 style={{ width: 230 }} placeholder="SERVER_LIST, DATA"
+                 title="Comma-separated TABLES parameters to request. Leave blank if unsure — an empty result usually means the name is wrong." />
+          <button className="btn secondary" disabled={!sid || !!busy || !diagFn.trim()}
+                  onClick={runDiagnose}>
+            {busy === "diag" ? "Calling…" : "Call"}
+          </button>
+        </div>
+
+        {diag && (
+          <div style={{ marginTop: 12 }}>
+            {diag.ok ? (
+              <>
+                <div style={{ fontSize: 12, marginBottom: 6 }}>
+                  <strong style={{ color: "var(--green)" }}>✓ {diag.function}</strong>
+                  <span style={{ color: "var(--text-3)", marginLeft: 8 }}>
+                    returned these top-level fields:
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                  {(diag.top_level_keys ?? []).map(k => {
+                    const n = diag.table_sizes?.[k];
+                    const isTable = n !== undefined;
+                    return (
+                      <span key={k} style={{
+                        fontSize: 11.5, padding: "3px 8px", borderRadius: 6,
+                        fontFamily: "ui-monospace, monospace",
+                        background: isTable && n > 0 ? "rgba(48,209,88,.16)"
+                          : isTable ? "rgba(255,159,10,.16)" : "rgba(255,255,255,.06)",
+                        color: isTable && n > 0 ? "var(--green)"
+                          : isTable ? "var(--orange,#FF9F0A)" : "var(--text-2)",
+                      }}>
+                        {k}{isTable ? ` — ${n} row${n === 1 ? "" : "s"}` : ""}
+                      </span>
+                    );
+                  })}
+                </div>
+                {Object.values(diag.table_sizes ?? {}).every(n => n === 0) && (
+                  <div style={{ fontSize: 11.5, color: "var(--orange,#FF9F0A)", marginBottom: 8 }}>
+                    Every table came back empty. If the field you expected isn&apos;t listed
+                    above at all, it wasn&apos;t requested — add its name to Tables and call again.
+                  </div>
+                )}
+                <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                        onClick={() => setShowXml(v => !v)}>
+                  {showXml ? "Hide raw XML" : "Show raw XML"}
+                </button>
+                {showXml && (
+                  <pre style={{
+                    marginTop: 8, padding: 10, borderRadius: 8, maxHeight: 320,
+                    overflow: "auto", fontSize: 11, lineHeight: 1.45,
+                    background: "rgba(255,255,255,.04)", whiteSpace: "pre-wrap",
+                  }}>{diag.raw_xml || "(not returned)"}</pre>
+                )}
+              </>
+            ) : (
+              <div style={{ padding: "8px 10px", borderRadius: 8,
+                             background: "rgba(255,69,58,.10)", color: "var(--red)", fontSize: 12 }}>
+                {diag.error}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

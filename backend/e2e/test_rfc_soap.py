@@ -127,8 +127,11 @@ try:
     # ---- 11. single-row table must NOT be lost ----
     sl = next(c for c in basis_checks.CHECKS if c.check_id == "server_list").run(client)
     check("11. SINGLE-row table parsed as one row (not dropped)",
-          sl.ok and len(sl.rows) == 1 and sl.rows[0]["Host"] == "sapf4h01",
+          sl.ok and len(sl.rows) == 1 and sl.rows[0]["Host"] == "nwrhel9",
           f"ok={sl.ok} rows={sl.rows} err={sl.error}")
+    check("11b. SM51 uses the LIST table name confirmed live on release 758",
+          sl.ok and sl.rows[0]["Server"] == "nwrhel9_F4H_00" and not sl.suspicious,
+          f"rows={sl.rows} suspicious={sl.suspicious[:80]}")
 
     # ---- 12-13. SM37 via the XBP interface (logon/select/logoff) ----
     jobs = basis_checks.run_job_check(client)

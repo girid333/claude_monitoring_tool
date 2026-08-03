@@ -58,13 +58,21 @@ WPINFO = """<?xml version="1.0" encoding="utf-8"?>
 
 # SINGLE-row table rendered as one <item> — the shape that makes naive
 # parsers return a dict instead of a list and silently lose the row.
+#
+# Uses the REAL parameter name and field names confirmed live on F4H
+# (release 758): the table is LIST (type MSXXLIST) with NAME/HOST/SERV/
+# MSGTYPES — NOT SERVER_LIST, which isn't a parameter of this FM at all.
+# MSG_INSTANCE is an EXPORT, and it was the ONLY thing that came back when
+# the wrong table name was declared.
 SERVER_LIST = """<?xml version="1.0" encoding="utf-8"?>
 <soap-env:Envelope xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/">
 <soap-env:Body>
 <rfc:TH_SERVER_LIST.Response xmlns:rfc="urn:sap-com:document:sap:rfc:functions">
-<SERVER_LIST>
-<item><NAME>sapf4h01_F4H_00</NAME><HOST>sapf4h01</HOST><SERVTYPE>DIA BTC UPD</SERVTYPE></item>
-</SERVER_LIST>
+<MSG_INSTANCE/>
+<LIST>
+<item><NAME>nwrhel9_F4H_00</NAME><HOST>nwrhel9</HOST><SERV>sapdp00</SERV>
+<MSGTYPES>DIA BTC UPD SPO UP2</MSGTYPES></item>
+</LIST>
 </rfc:TH_SERVER_LIST.Response>
 </soap-env:Body>
 </soap-env:Envelope>"""
@@ -189,7 +197,7 @@ RESPONSES = {
 TABLE_PARAM = {
     "TH_WPINFO": "WPLIST",
     "TH_WPINFO_ALT": "WP_TABLE",
-    "TH_SERVER_LIST": "SERVER_LIST",
+    "TH_SERVER_LIST": "LIST",
     "BAPI_XBP_JOB_SELECT": "JOB_HEAD",
     "RFC_READ_TABLE": "DATA",
 }

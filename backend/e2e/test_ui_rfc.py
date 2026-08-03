@@ -29,6 +29,22 @@ with sync_playwright() as p:
     check("6. Sweep ran and reported per-check outcome", "checks succeeded" in body)
     check("7. SM50 work processes rendered", "Work processes" in body and "3011" in body, body[:400])
     check("8. CANCELLED job anomaly surfaced in red list", "Z_FAILED_LOAD" in body and "CANCELLED" in body)
-    check("9. No client-side JS errors", not errs, errs[:2])
+    # --- diagnostic panel: must work from the PAGE, no Swagger/curl needed ---
+    pg.wait_for_selector("text=Diagnose a function module", timeout=5000)
+    check("10. Diagnostic panel present on the page", True)
+    fn = pg.query_selector("input[placeholder='TH_SERVER_LIST']")
+    tb = pg.query_selector("input[placeholder='SERVER_LIST, DATA']")
+    fn.fill("TH_WPINFO")
+    tb.fill("WPLIST")
+    pg.click("button:has-text('Call')")
+    pg.wait_for_selector("text=returned these top-level fields", timeout=15000)
+    body2 = pg.inner_text("body")
+    check("11. Diagnose shows the real response field names + row counts",
+          "WPLIST" in body2 and "3 rows" in body2, body2[-500:])
+    pg.click("button:has-text('Show raw XML')")
+    pg.wait_for_selector("pre", timeout=5000)
+    check("12. Raw XML viewable for deeper diagnosis",
+          "WPLIST" in pg.inner_text("pre"), pg.inner_text("pre")[:200])
+    check("13. Still no client-side JS errors after diagnosing", not errs, errs[:2])
     b.close()
 print("D-045 UI: " + ("ALL PASSED" if ok else "FAILURES ABOVE"))

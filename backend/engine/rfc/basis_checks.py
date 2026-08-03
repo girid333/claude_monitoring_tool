@@ -253,11 +253,14 @@ def _interpret_wpinfo(reply: dict) -> tuple[list[dict], list[str], str]:
 
 def _interpret_server_list(reply: dict) -> tuple[list[dict], list[str], str]:
     """SM51 — active application servers."""
-    rows = _first_table(reply, "SERVER_LIST", "SERVERS", "SERVER_TAB", "LIST")
+    rows = _first_table(reply, "LIST", "SERVER_LIST", "SERVERS", "SERVER_TAB")
+    # MSXXLIST (what TH_SERVER_LIST's LIST table actually carries) uses NAME /
+    # HOST / SERV / MSGTYPES. Older spellings kept so this stays release-tolerant.
     out = [{
         "Server": (r.get("NAME") or r.get("SERVERNAME") or "").strip(),
         "Host": (r.get("HOST") or "").strip(),
-        "Services": (r.get("SERVTYPE") or r.get("SERVICES") or "").strip(),
+        "Service": (r.get("SERV") or r.get("SERVICE") or "").strip(),
+        "Type": (r.get("MSGTYPES") or r.get("SERVTYPE") or r.get("SERVICES") or "").strip(),
     } for r in rows]
     return out, [], f"{len(out)} application server(s) active"
 
@@ -353,14 +356,18 @@ CHECKS: list[RfcCheck] = [
     ),
     RfcCheck(
         check_id="server_list", title="Active servers", tcode="SM51",
-        function="TH_SERVER_LIST", tables=["SERVER_LIST"],
-        # Confirmed empty on release 758 with SERVER_LIST, so the name differs
-        # there; try the other documented spellings before giving up.
-        table_candidates=[["SERVERS"], ["LIST"], ["SERVER_TAB"], ["TH_SERVER_LIST"]],
-        interpret=_interpret_server_list, confidence="unverified",
-        note="Returns the instance list. The export table name varies by release; "
-             "several spellings are tried automatically. If all fail, /api/rfc/raw "
-             "will show the real one.",
+        # LIVE-DIAGNOSED on F4H (release 758): calling this FM with
+        # SERVER_LIST declared returned ONLY the MSG_INSTANCE export and no
+        # tables whatsoever — i.e. SERVER_LIST isn't a parameter of this FM at
+        # all, so SAP silently ignored it. The real TABLES parameter is LIST
+        # (type MSXXLIST). Ordered accordingly, with the other spellings kept
+        # as fallbacks for other releases.
+        function="TH_SERVER_LIST", tables=["LIST"],
+        table_candidates=[["SERVER_LIST"], ["SERVERS"], ["SERVER_TAB"]],
+        interpret=_interpret_server_list, confidence="verified",
+        note="Returns the instance list in the LIST table (confirmed against "
+             "release 758 via /api/rfc/raw). Other spellings are tried as "
+             "fallbacks for older releases.",
     ),
     # NOTE (live finding, F4H rel 758): the original ST22 check queried
     # SNAP and failed with TABLE_NOT_AVAILABLE. That is not a permissions
