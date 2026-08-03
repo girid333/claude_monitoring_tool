@@ -31,6 +31,11 @@ _interpret_sysinfo_marker = next(
     c.interpret for c in basis_checks.CHECKS if c.check_id == "system_info")
 
 
+def _interpret_wp_alt(reply):
+    rows = basis_checks._first_table(reply, "WPLIST")
+    return rows, [], f"{len(rows)} rows"
+
+
 def _rows_of(reply, name):
     value = reply.get(name)
     if isinstance(value, list):
@@ -134,10 +139,13 @@ try:
 
     # ---- 14. RFC_READ_TABLE fixed-width split into named columns ----
     jt = next(c for c in basis_checks.CHECKS if c.check_id == "job_table").run(client)
+    by_job = {r["Job"]: r for r in jt.rows}
     check("14. RFC_READ_TABLE fixed-width rows split into named columns",
-          jt.ok and len(jt.rows) == 2 and jt.rows[0]["Job"] == "NIGHTLY_BATCH"
-          and jt.rows[0]["User"] == "GIRID",
+          jt.ok and len(jt.rows) == 2 and by_job["NIGHTLY_BATCH"]["User"] == "GIRID"
+          and by_job["NIGHTLY_BATCH"]["Status"] == "Finished",
           f"ok={jt.ok} rows={jt.rows} err={jt.error}")
+    check("14c. Jobs sorted newest-first (monitoring leads with what just happened)",
+          jt.rows[0]["Start time"] == "031500", [r["Start time"] for r in jt.rows])
     check("14b. TBTCO job-table check flags the CANCELLED job too (XBP-independent)",
           any("Z_FAILED_LOAD" in a and "CANCELLED" in a for a in jt.anomalies), jt.anomalies)
 
@@ -231,6 +239,33 @@ try:
     empty = [r.check_id for r in strict if r.ok and not r.rows]
     check("29. Against a strict SAP-like server, no check returns empty",
           empty == [], empty)
+
+    # ---- 30-33. usability fixes driven by the live data ----
+    # 30: 75 identical anomaly lines is one finding repeated, not 75 findings.
+    deduped = basis_checks._dedupe_anomalies(
+        ["Job X is CANCELLED"] * 50 + ["Job Y is CANCELLED"] + ["Job Z is CANCELLED"] * 2)
+    check("30. Repeated anomalies collapse into counts, newest signal kept",
+          len(deduped) == 3 and "(×50)" in deduped[0] and "Job Y is CANCELLED" in deduped,
+          deduped)
+    many = basis_checks._dedupe_anomalies([f"distinct {i}" for i in range(40)], limit=25)
+    check("31. A huge distinct anomaly list is capped with an explicit remainder",
+          len(many) == 26 and "15 more" in many[-1], many[-3:])
+
+    # 32: the job window must actually reach SAP as an OPTIONS WHERE clause.
+    jt_check = next(c for c in basis_checks.CHECKS if c.check_id == "job_table")
+    env = build_envelope("RFC_READ_TABLE", jt_check.call_params()).decode()
+    check("32. Job read is date-filtered via OPTIONS (not a stale arbitrary 200 rows)",
+          "<OPTIONS" in env and "STRTDATE GE" in env, env[:400])
+
+    # 33: table-name fallback — first candidate empty, a later one works.
+    alt_check = basis_checks.RfcCheck(
+        check_id="alt", title="alt", tcode="SM51", function="TH_WPINFO_ALT",
+        tables=["NOPE_WRONG_NAME"], table_candidates=[["WP_TABLE"]],
+        interpret=_interpret_wp_alt)
+    alt_res = alt_check.run(client)
+    check("33. Wrong table name self-heals via candidate fallback",
+          alt_res.ok and len(alt_res.rows) == 2 and not alt_res.suspicious,
+          f"rows={len(alt_res.rows)} suspicious={alt_res.suspicious[:80]}")
 
 finally:
     srv.terminate()

@@ -72,25 +72,53 @@ class RfcCheck:
     # completely empty response. Most tellingly, RFC_READ_TABLE was being sent
     # FIELDS but never DATA — and DATA is the table that holds the rows.
     tables: list[str] = field(default_factory=list)
+    # Alternative TABLES names to try when `tables` yields nothing. SAP renames
+    # export tables between releases (TH_SERVER_LIST returns SERVER_LIST on some
+    # systems and something else on others), and since an undeclared table is
+    # simply absent from the reply, no amount of clever parsing can recover it —
+    # the NAME has to be right in the REQUEST. Trying a short candidate list
+    # makes the check self-heal across releases instead of costing a
+    # diagnose-and-patch round trip for every system.
+    table_candidates: list[list[str]] = field(default_factory=list)
+    # Optional callable producing extra params at call time (e.g. a date window
+    # that has to be "today", which a static dict cannot express).
+    dynamic_params: Optional[Callable[[], dict]] = None
 
-    def call_params(self) -> dict:
+    def call_params(self, tables: Optional[list[str]] = None) -> dict:
         """Params plus an empty element for each declared TABLES parameter,
         without which SAP simply won't return that table (see `tables`)."""
         merged = dict(self.params)
-        for name in self.tables:
+        if self.dynamic_params:
+            merged.update(self.dynamic_params())
+        for name in (self.tables if tables is None else tables):
             merged.setdefault(name, [])
         return merged
 
     def run(self, client: RfcSoapClient) -> CheckResult:
-        try:
-            reply = client.call(self.function, **self.call_params())
-        except RfcSoapError as exc:
-            return CheckResult(self.check_id, self.title, ok=False, error=exc.message,
-                                error_kind=exc.kind, function=self.function)
-        except Exception as exc:  # noqa: BLE001 - one bad check never kills the sweep
-            return CheckResult(self.check_id, self.title, ok=False,
-                                error=f"unexpected error: {exc!r}", error_kind="error",
-                                function=self.function)
+        attempts = [self.tables] + list(self.table_candidates)
+        reply: dict = {}
+        last_error: Optional[RfcSoapError] = None
+        tried: list[str] = []
+        for table_set in attempts:
+            try:
+                reply = client.call(self.function, **self.call_params(table_set))
+            except RfcSoapError as exc:
+                last_error = exc
+                tried.append("+".join(table_set) or "(none)")
+                continue
+            except Exception as exc:  # noqa: BLE001 - one bad check never kills the sweep
+                return CheckResult(self.check_id, self.title, ok=False,
+                                    error=f"unexpected error: {exc!r}", error_kind="error",
+                                    function=self.function)
+            last_error = None
+            tried.append("+".join(table_set) or "(none)")
+            # Good enough if ANY table came back with content.
+            if any(isinstance(v, list) and v for v in reply.values()):
+                break
+        if last_error is not None and not reply:
+            return CheckResult(self.check_id, self.title, ok=False, error=last_error.message,
+                                error_kind=last_error.kind, function=self.function)
+        self._tried_tables = tried
         try:
             rows, anomalies, summary = (self.interpret(reply) if self.interpret
                                          else (_generic_rows(reply), [], ""))
@@ -100,15 +128,37 @@ class RfcCheck:
                                 error_kind="parse", function=self.function)
         suspicious = ""
         if self.expects_rows and not rows:
+            attempted = ", ".join(getattr(self, "_tried_tables", []) or ["(none)"])
             suspicious = (
                 f"{self.function} returned no rows. A live system should always report "
-                f"something here, so this is most likely a parameter/field-name mismatch "
-                f"on this release, or missing authorization — not a genuinely empty "
-                f"result. Use POST /api/rfc/raw with function={self.function} to see "
-                f"exactly what SAP returned.")
+                f"something here, so this is most likely the TABLES parameter having a "
+                f"different name on this release, or missing authorization — not a "
+                f"genuinely empty result. Declared table names tried: {attempted}. "
+                f"Use POST /api/rfc/raw with function={self.function} (and a 'tables' "
+                f"list) to see exactly what SAP returns.")
         return CheckResult(self.check_id, self.title, ok=True, rows=rows,
                             anomalies=anomalies, summary=summary, function=self.function,
                             suspicious=suspicious)
+
+
+def _dedupe_anomalies(items: list[str], limit: int = 25) -> list[str]:
+    """Collapse repeats into counts.
+
+    The first useful live sweep produced 75 anomaly lines, ~50 of them the
+    identical "Job SRSM_AMA_SELFMON_HEARTBEAT is CANCELLED". That is one
+    finding repeated, not fifty findings, and rendering it verbatim buries
+    the genuinely distinct problems (SAP_LMDB_NOTIFY_DISPATCHER, the
+    SELFMON_CONFIG/ERRORS jobs) in noise. Counting repeats keeps the signal
+    and preserves the magnitude."""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item] = counts.get(item, 0) + 1
+    out = [(f"{msg}  (×{n})" if n > 1 else msg) for msg, n in
+           sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    if len(out) > limit:
+        hidden = len(out) - limit
+        out = out[:limit] + [f"… and {hidden} more distinct anomal{'y' if hidden == 1 else 'ies'}"]
+    return out
 
 
 def _as_rows(value: Any) -> list[dict]:
@@ -198,7 +248,7 @@ def _interpret_wpinfo(reply: dict) -> tuple[list[dict], list[str], str]:
         if (r.get("WP_IPRIV") or "").strip() in ("X", "yes", "Yes"):
             anomalies.append(f"WP {r.get('WP_INDEX','?')} ({wp_type}) is running in PRIV mode")
     running = sum(1 for r in out if r["Status"].lower() == "running")
-    return out, anomalies, f"{len(out)} work processes, {running} running"
+    return out, _dedupe_anomalies(anomalies), f"{len(out)} work processes, {running} running"
 
 
 def _interpret_server_list(reply: dict) -> tuple[list[dict], list[str], str]:
@@ -230,7 +280,23 @@ def _interpret_xbp_jobs(reply: dict) -> tuple[list[dict], list[str], str]:
         })
         if raw == "A":
             anomalies.append(f"Job {name} is CANCELLED")
-    return out, anomalies, f"{len(out)} job(s); {len(anomalies)} cancelled"
+    cancelled = len(anomalies)
+    return out, _dedupe_anomalies(anomalies), f"{len(out)} job(s); {cancelled} cancelled"
+
+
+JOB_WINDOW_DAYS = 2
+
+
+def _job_window_params() -> dict:
+    """Restrict TBTCO to a recent window.
+
+    Without this the read returns whatever 200 rows the database hands back
+    — on the live system that meant jobs from five days earlier, which is
+    not "current state" and is useless for monitoring. OPTIONS is itself a
+    TABLES parameter, so it must be declared like any other."""
+    from datetime import date, timedelta
+    since = (date.today() - timedelta(days=JOB_WINDOW_DAYS)).strftime("%Y%m%d")
+    return {"OPTIONS": [{"TEXT": f"STRTDATE GE '{since}'"}]}
 
 
 def _interpret_job_table(reply: dict) -> tuple[list[dict], list[str], str]:
@@ -248,7 +314,11 @@ def _interpret_job_table(reply: dict) -> tuple[list[dict], list[str], str]:
                      "Start time": (r.get("STRTTIME") or "").strip()})
         if raw == "A":
             anomalies.append(f"Job {name} is CANCELLED")
-    return out, anomalies, f"{len(out)} job(s); {len(anomalies)} cancelled"
+    # newest first — a monitoring view should lead with what just happened
+    out.sort(key=lambda r: (r["Start date"], r["Start time"]), reverse=True)
+    cancelled = len(anomalies)
+    return (out, _dedupe_anomalies(anomalies),
+            f"{len(out)} job(s) in the last {JOB_WINDOW_DAYS} day(s); {cancelled} cancelled")
 
 
 def _interpret_read_table(reply: dict) -> tuple[list[dict], list[str], str]:
@@ -284,10 +354,13 @@ CHECKS: list[RfcCheck] = [
     RfcCheck(
         check_id="server_list", title="Active servers", tcode="SM51",
         function="TH_SERVER_LIST", tables=["SERVER_LIST"],
+        # Confirmed empty on release 758 with SERVER_LIST, so the name differs
+        # there; try the other documented spellings before giving up.
+        table_candidates=[["SERVERS"], ["LIST"], ["SERVER_TAB"], ["TH_SERVER_LIST"]],
         interpret=_interpret_server_list, confidence="unverified",
-        note="Returns the instance list. The table name differs across releases "
-             "(SERVER_LIST vs SERVERS); if this stays empty, use /api/rfc/raw to see "
-             "which name this release uses.",
+        note="Returns the instance list. The export table name varies by release; "
+             "several spellings are tried automatically. If all fail, /api/rfc/raw "
+             "will show the real one.",
     ),
     # NOTE (live finding, F4H rel 758): the original ST22 check queried
     # SNAP and failed with TABLE_NOT_AVAILABLE. That is not a permissions
@@ -297,7 +370,8 @@ CHECKS: list[RfcCheck] = [
     # (see OQ-20); rather than ship a check that can never work, this slot
     # now holds a genuinely useful transparent-table check.
     RfcCheck(
-        check_id="job_table", title="Background jobs (table read)", tcode="SM37",
+        check_id="job_table", title=f"Background jobs (last {JOB_WINDOW_DAYS} days)",
+        tcode="SM37",
         function="RFC_READ_TABLE",
         params={"QUERY_TABLE": "TBTCO", "DELIMITER": "",
                 "FIELDS": [{"FIELDNAME": "JOBNAME"}, {"FIELDNAME": "SDLUNAME"},
@@ -306,11 +380,12 @@ CHECKS: list[RfcCheck] = [
                 "ROWCOUNT": 200},
         # DATA is the table holding the actual rows. Sending FIELDS without
         # DATA is exactly why this returned "0 job(s)" against the live system.
-        tables=["DATA"],
+        tables=["DATA", "OPTIONS"], dynamic_params=_job_window_params,
         interpret=_interpret_job_table, confidence="verified",
         note="TBTCO is the transparent table behind SM37, so this works via "
              "RFC_READ_TABLE and doubles as a fallback if the XBP interface "
-             "is unavailable. Needs S_TABU_* authorization for TBTCO.",
+             "is unavailable. Restricted to recent jobs via an OPTIONS WHERE "
+             "clause. Needs S_TABU_* authorization for TBTCO.",
     ),
 ]
 
