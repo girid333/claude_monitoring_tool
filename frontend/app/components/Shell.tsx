@@ -8,7 +8,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutGrid, PlayCircle, Radar, FileText, Server, FlaskConical } from "lucide-react";
+import { LayoutGrid, PlayCircle, Radar, FileText, Server, FlaskConical, Plug } from "lucide-react";
 import type { ReactNode } from "react";
 import { useRun } from "./RunContext";
 
@@ -18,6 +18,8 @@ const NAV = [
   { href: "/runs", label: "Runs", icon: PlayCircle },
   { href: "/recorder", label: "Recorder", icon: Radar },
   { href: "/reports", label: "Reports", icon: FileText },
+  // D-045: API-based BASIS checks (RFC over SOAP) — no agent, no replay.
+  { href: "/rfc", label: "RFC Checks", icon: Plug },
   // D-044: kept as its own nav entry, deliberately not folded into
   // Recorder/Landscape — this is an isolated sandbox, not merged with the
   // existing WebGUI record/replay flow yet.
