@@ -254,14 +254,21 @@ def _interpret_wpinfo(reply: dict) -> tuple[list[dict], list[str], str]:
 def _interpret_server_list(reply: dict) -> tuple[list[dict], list[str], str]:
     """SM51 — active application servers."""
     rows = _first_table(reply, "LIST", "SERVER_LIST", "SERVERS", "SERVER_TAB")
-    # MSXXLIST (what TH_SERVER_LIST's LIST table actually carries) uses NAME /
-    # HOST / SERV / MSGTYPES. Older spellings kept so this stays release-tolerant.
-    out = [{
-        "Server": (r.get("NAME") or r.get("SERVERNAME") or "").strip(),
-        "Host": (r.get("HOST") or "").strip(),
-        "Service": (r.get("SERV") or r.get("SERVICE") or "").strip(),
-        "Type": (r.get("MSGTYPES") or r.get("SERVTYPE") or r.get("SERVICES") or "").strip(),
-    } for r in rows]
+    # MSXXLIST carries NAME / HOST plus MSGTYPES, which is a RAW bitmask that
+    # SAP's SOAP layer base64-encodes ("uw==" live on F4H). Decoding that
+    # bitmask reliably across releases isn't something I can claim to do, and
+    # showing base64 in a monitoring table is worse than showing nothing — so
+    # only the fields that are genuinely meaningful are surfaced. The instance
+    # NAME already encodes host and instance number, which is what SM51 is
+    # actually consulted for.
+    out = []
+    for r in rows:
+        name = (r.get("NAME") or r.get("SERVERNAME") or "").strip()
+        row = {"Server": name, "Host": (r.get("HOST") or "").strip()}
+        instance = name.rsplit("_", 1)[-1] if "_" in name else ""
+        if instance.isdigit():
+            row["Instance"] = instance
+        out.append(row)
     return out, [], f"{len(out)} application server(s) active"
 
 
@@ -288,6 +295,7 @@ def _interpret_xbp_jobs(reply: dict) -> tuple[list[dict], list[str], str]:
 
 
 JOB_WINDOW_DAYS = 2
+JOB_ROW_LIMIT = 500   # raised from 200: the live system filled 200 in 2 days
 
 
 def _job_window_params() -> dict:
@@ -320,8 +328,12 @@ def _interpret_job_table(reply: dict) -> tuple[list[dict], list[str], str]:
     # newest first — a monitoring view should lead with what just happened
     out.sort(key=lambda r: (r["Start date"], r["Start time"]), reverse=True)
     cancelled = len(anomalies)
+    # Be explicit when the ROWCOUNT cap was hit — otherwise "200 jobs" reads as
+    # the complete picture when it's actually a truncated one.
+    capped = " (row limit reached — there may be more)" if len(out) >= JOB_ROW_LIMIT else ""
     return (out, _dedupe_anomalies(anomalies),
-            f"{len(out)} job(s) in the last {JOB_WINDOW_DAYS} day(s); {cancelled} cancelled")
+            f"{len(out)} job(s) in the last {JOB_WINDOW_DAYS} day(s); "
+            f"{cancelled} cancelled{capped}")
 
 
 def _interpret_read_table(reply: dict) -> tuple[list[dict], list[str], str]:
@@ -384,7 +396,7 @@ CHECKS: list[RfcCheck] = [
                 "FIELDS": [{"FIELDNAME": "JOBNAME"}, {"FIELDNAME": "SDLUNAME"},
                             {"FIELDNAME": "STATUS"}, {"FIELDNAME": "STRTDATE"},
                             {"FIELDNAME": "STRTTIME"}],
-                "ROWCOUNT": 200},
+                "ROWCOUNT": JOB_ROW_LIMIT},
         # DATA is the table holding the actual rows. Sending FIELDS without
         # DATA is exactly why this returned "0 job(s)" against the live system.
         tables=["DATA", "OPTIONS"], dynamic_params=_job_window_params,
@@ -404,8 +416,13 @@ XBP_INTERFACE = ("BAPI_XMI_LOGON", "BAPI_XBP_JOB_SELECT", "BAPI_XMI_LOGOFF")
 def run_job_check(client: RfcSoapClient, max_jobs: int = 200) -> CheckResult:
     """SM37 via the XBP interface. XBP mandates an XMI logon/logoff around
     the actual call (documented in SAP's BC-XBP interface spec), which is
-    why this can't be a plain declarative entry in CHECKS."""
+    why this can't be a plain declarative entry in CHECKS.
+
+    EXTERNAL_USER_NAME is mandatory for XBP BAPIs — it identifies the caller
+    for XBP's own auditing, and omitting it is the likeliest reason the first
+    live attempts returned zero jobs with no error at all."""
     check_id, title = "background_jobs", "Background jobs"
+    ext_user = client.target.username or "MONITOR"
     try:
         client.call("BAPI_XMI_LOGON", EXTCOMPANY="CLAUDEMON", EXTPRODUCT="SAPSENTINEL",
                      INTERFACE="XBP", VERSION="3.0")
@@ -414,11 +431,16 @@ def run_job_check(client: RfcSoapClient, max_jobs: int = 200) -> CheckResult:
                             error=f"XBP logon failed: {exc.message}",
                             error_kind=exc.kind, function="BAPI_XMI_LOGON")
     try:
+        from datetime import date, timedelta
+        since = (date.today() - timedelta(days=JOB_WINDOW_DAYS)).strftime("%Y%m%d")
         reply = client.call("BAPI_XBP_JOB_SELECT",
+                             EXTERNAL_USER_NAME=ext_user,   # mandatory for XBP
                              JOB_SELECT_PARAM={"JOBNAME": "*", "USERNAME": "*",
+                                                "FROM_DATE": since, "TO_DATE": "99991231",
                                                 "ABORTED": "X", "FINISHED": "X",
                                                 "RUNNING": "X", "READY": "X",
-                                                "SCHEDUL": "X", "RELEASED": "X"},
+                                                "SCHEDUL": "X", "RELEASED": "X",
+                                                "PRELIM": "X"},
                              MAX_SELECT=max_jobs,
                              # Declare the result table, or SAP returns nothing
                              # at all (see RfcCheck.tables).
@@ -427,10 +449,12 @@ def run_job_check(client: RfcSoapClient, max_jobs: int = 200) -> CheckResult:
         suspicious = ""
         if not rows:
             suspicious = (
-                "XBP returned no jobs. Most likely the XMI session did not carry over "
-                "to this call, or the selection parameters are too narrow for this "
-                "release. The 'Background jobs (table read)' check reads TBTCO directly "
-                "and does not depend on XBP — compare the two.")
+                "XBP returned no jobs even with EXTERNAL_USER_NAME and a date window "
+                "supplied. XBP keeps session state that plain HTTP may not preserve "
+                "between calls, so this interface may simply not be usable over the "
+                "SOAP transport on this system. This is not blocking: the 'Background "
+                "jobs (last 2 days)' check reads TBTCO directly, needs no XBP, and is "
+                "already returning your real job data.")
         return CheckResult(check_id, title, ok=True, rows=rows, anomalies=anomalies,
                             summary=summary, function="BAPI_XBP_JOB_SELECT",
                             suspicious=suspicious)

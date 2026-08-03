@@ -270,6 +270,39 @@ try:
           alt_res.ok and len(alt_res.rows) == 2 and not alt_res.suspicious,
           f"rows={len(alt_res.rows)} suspicious={alt_res.suspicious[:80]}")
 
+    # ---- 34-36. live-data polish ----
+    # 34: MSGTYPES arrives base64-encoded ("uw==" on F4H). Showing that in a
+    #     monitoring table is worse than omitting it.
+    cols = set(sl.rows[0].keys())
+    check("34. SM51 omits the base64 RAW bitmask columns, keeps meaningful ones",
+          "Server" in cols and "Host" in cols and "Type" not in cols, cols)
+
+    # 35: XBP BAPIs require EXTERNAL_USER_NAME — never sent before, and the
+    #     likeliest reason live XBP returned zero jobs with no error.
+    import inspect
+    src = inspect.getsource(basis_checks.run_job_check)
+    check("35. XBP call supplies the mandatory EXTERNAL_USER_NAME",
+          "EXTERNAL_USER_NAME" in src)
+
+    # 36: a truncated job list must SAY it's truncated, rather than letting
+    #     "500 jobs" read as the complete picture.
+    fields = [{"FIELDNAME": "JOBNAME", "OFFSET": "0", "LENGTH": "32"},
+              {"FIELDNAME": "SDLUNAME", "OFFSET": "32", "LENGTH": "12"},
+              {"FIELDNAME": "STATUS", "OFFSET": "44", "LENGTH": "1"},
+              {"FIELDNAME": "STRTDATE", "OFFSET": "45", "LENGTH": "8"},
+              {"FIELDNAME": "STRTTIME", "OFFSET": "53", "LENGTH": "6"}]
+
+    def _wa(i, status="F"):
+        return {"WA": f"JOB{i}".ljust(32) + "GIRID".ljust(12) + status + "20260803" + "010000"}
+
+    full = {"FIELDS": fields, "DATA": [_wa(i) for i in range(basis_checks.JOB_ROW_LIMIT)]}
+    _, _, summary_capped = basis_checks._interpret_job_table(full)
+    partial = {"FIELDS": fields, "DATA": [_wa(i) for i in range(5)]}
+    _, _, summary_small = basis_checks._interpret_job_table(partial)
+    check("36. Truncated job list says so; a short one doesn't claim truncation",
+          "row limit reached" in summary_capped and "row limit" not in summary_small,
+          f"capped={summary_capped!r} small={summary_small!r}")
+
 finally:
     srv.terminate()
 
