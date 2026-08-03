@@ -40,6 +40,7 @@ import os
 import re
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -237,6 +238,41 @@ class RunRequest(BaseModel):
     flows: list[str] = []            # paths under flows/
     dataset: str | None = None
     include_core_basis: bool = False  # D-017: also run v1's 23-T-code sweep
+    # D-043: replay-time input overrides — {flow_id: {step_index: new_value}}.
+    # Giri: "what if during replay i want to change some inputs for the
+    # field?" A recording's values are a template, not a contract; the UI's
+    # step viewer lets each SET step's value be edited before Execute, and
+    # those edits arrive here. Applied to the loaded Flow in memory only —
+    # the saved recording on disk is never modified.
+    flow_overrides: dict[str, dict[str, Any]] = {}
+
+
+def _apply_overrides(flow, overrides: dict[str, Any]) -> list[str]:
+    """D-043: apply {step_index: value} onto a loaded Flow's SET steps.
+    Returns human-readable notes for anything skipped (bad index / not a
+    SET step) so the run log shows WHY an override didn't take, rather
+    than it just silently not applying."""
+    from engine.schema import Act
+    notes = []
+    for key, value in (overrides or {}).items():
+        try:
+            idx = int(key)
+        except (TypeError, ValueError):
+            notes.append(f"override ignored: {key!r} is not a step index")
+            continue
+        if not (0 <= idx < len(flow.steps)):
+            notes.append(f"override ignored: no step {idx}")
+            continue
+        step = flow.steps[idx]
+        if step.act != Act.SET:
+            notes.append(f"override ignored: step {idx} is {step.act.value}, not set")
+            continue
+        # Preserve the recorded value's TYPE where it matters: a checkbox
+        # step's value is a bool, and the UI sends strings.
+        if isinstance(step.value, bool) and isinstance(value, str):
+            value = value.strip().lower() in ("true", "check", "checked", "select", "1", "yes", "x")
+        step.value = value
+    return notes
 
 
 class RecorderStartRequest(BaseModel):
@@ -729,8 +765,18 @@ async def _execute_run_inner(run_id: str, req: RunRequest) -> None:
                     # bad flow can no longer take its siblings down with it.
                     try:
                         flow = Flow(**json.loads(p.read_text()))
+                        # D-043: apply this flow's replay-time input edits
+                        # (in memory only — the recording on disk stays as
+                        # recorded).
+                        ov = req.flow_overrides.get(flow.flow_id) \
+                            or req.flow_overrides.get(Path(flow_path).stem) or {}
+                        if ov:
+                            for note in _apply_overrides(flow, ov):
+                                await emit(run_id, {"type": "flow_note", "sid": sid,
+                                                    "flow_id": flow.flow_id, "note": note})
                         await emit(run_id, {"type": "flow_start", "sid": sid,
-                                            "flow_id": flow.flow_id})
+                                            "flow_id": flow.flow_id,
+                                            "overrides": len(ov)})
                         await dismiss_known_popups(page)
                         fr = await engine.run(flow)
                     except Exception as exc:  # noqa: BLE001

@@ -35,18 +35,19 @@ class DomResolver(Resolver):
         if dom is None:
             raise ResolveError(target, tried=["<no dom candidates recorded>"])
 
-        # Tier 0 — D-040: positional checkbox match. SAP renders checkboxes
-        # as ARIA spans (role="checkbox") that usually have no distinguishing
-        # name/title, so the generic attr/label chain below tends to either
-        # miss them or, worse, match the SAME element for every checkbox on
-        # the screen (all six would resolve to `.first`). Position among all
-        # role="checkbox" elements is what's actually stable here — ported
-        # from v1's SM37 job-overview fix (get_by_role("checkbox").nth(i)).
-        if dom.role == "checkbox" and dom.checkbox_index is not None:
-            loc = self.page.locator('[role="checkbox"]').nth(dom.checkbox_index)
-            tried.append(f"checkbox_index:{dom.checkbox_index}")
+        # Tier 0 — D-040/D-043: positional ARIA-toggle match. SAP renders
+        # checkboxes AND radio buttons as ARIA spans (role="checkbox"/
+        # "radio") that usually have no distinguishing name/title, so the
+        # generic attr/label chain below tends to either miss them or,
+        # worse, match the SAME element for every widget on the screen.
+        # Position among all same-role elements is what's actually stable —
+        # ported from v1's SM37 job-overview fix
+        # (get_by_role("checkbox").nth(i)) and generalized.
+        if dom.role in ("checkbox", "radio") and dom.checkbox_index is not None:
+            loc = self.page.locator(f'[role="{dom.role}"]').nth(dom.checkbox_index)
+            tried.append(f"{dom.role}_index:{dom.checkbox_index}")
             if await self._usable(loc):
-                return Resolution(loc, 0.9, f"checkbox_index:{dom.checkbox_index}", self.name)
+                return Resolution(loc, 0.9, f"{dom.role}_index:{dom.checkbox_index}", self.name)
 
         # Tier 1 — semantic attributes. D-042: `nth` was captured
         # (nthAmongSimilar) specifically to disambiguate when the same
@@ -152,16 +153,30 @@ class DomResolver(Resolver):
         loc: Locator = res.handle
         if isinstance(value, bool):
             await self._set_checkbox(loc, value)
-        else:
-            # v1 lesson (§6.8): JS-injected value beats .fill() on some SAP
-            # inputs with CSS visibility tricks. Try fill, fall back to JS.
+            return
+        # D-043: native <select> dropdowns (SAP does use real selects for
+        # some fields, e.g. SM37's "Or after event") need select_option —
+        # fill() throws on a select, and the JS fallback set the value
+        # without SAP's own change handling seeing a proper selection.
+        try:
+            tag = await loc.evaluate("el => el.tagName.toLowerCase()")
+        except Exception:  # noqa: BLE001
+            tag = ""
+        if tag == "select":
             try:
-                await loc.fill(str(value), timeout=2000)
-            except Exception:
-                await loc.evaluate(
-                    "(el, v) => { el.value = v; el.dispatchEvent(new Event('change', {bubbles:true})); }",
-                    str(value),
-                )
+                await loc.select_option(value=str(value))
+            except Exception:  # noqa: BLE001 — value may be the visible label
+                await loc.select_option(label=str(value))
+            return
+        # v1 lesson (§6.8): JS-injected value beats .fill() on some SAP
+        # inputs with CSS visibility tricks. Try fill, fall back to JS.
+        try:
+            await loc.fill(str(value), timeout=2000)
+        except Exception:
+            await loc.evaluate(
+                "(el, v) => { el.value = v; el.dispatchEvent(new Event('change', {bubbles:true})); }",
+                str(value),
+            )
 
     async def _set_checkbox(self, loc: Locator, want: bool) -> None:
         """D-040: SAP WebGUI checkboxes are ARIA widgets — `<span

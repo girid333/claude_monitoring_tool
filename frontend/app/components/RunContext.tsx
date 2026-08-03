@@ -36,7 +36,11 @@ const EMPTY: RunState = {
 };
 
 type Ctx = RunState & {
-  startRun: (sids: string[], opts: { coreBasis: boolean; flows: string[] }) => Promise<void>;
+  startRun: (sids: string[], opts: {
+    coreBasis: boolean; flows: string[];
+    // D-043: replay-time input overrides — {flowId: {stepIndex: value}}
+    flowOverrides?: Record<string, Record<string, string>>;
+  }) => Promise<void>;
   dismiss: () => void;
   isRunning: boolean;
 };
@@ -164,7 +168,8 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
   }, [attach]);
 
   const startRun = useCallback(async (sids: string[],
-                                       opts: { coreBasis: boolean; flows: string[] }) => {
+                                       opts: { coreBasis: boolean; flows: string[];
+                                               flowOverrides?: Record<string, Record<string, string>> }) => {
     setState({ ...EMPTY, sids, phase: "Starting run…", startedAt: Date.now() });
     try {
       const res = await fetch(`${API}/api/run`, {
@@ -173,6 +178,7 @@ export function RunProvider({ children }: { children: React.ReactNode }) {
           sids,
           flows: opts.flows,          // D-034: explicit flow_ids from the picker
           include_core_basis: opts.coreBasis,
+          flow_overrides: opts.flowOverrides ?? {},   // D-043
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);

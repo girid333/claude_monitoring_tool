@@ -143,15 +143,18 @@ _INJECT_JS = r"""
     } catch (e) { return null; }
   }
 
-  // D-040: SAP renders checkboxes as ARIA spans (role="checkbox",
-  // aria-checked="true|false"), not native <input type="checkbox">, and they
-  // rarely carry a distinguishing name/title. Position among all
-  // role="checkbox" elements on the screen is what's stable — SAP always
-  // renders a selection screen's checkboxes in the same order.
+  // D-040/D-043: SAP renders checkboxes AND radio buttons as ARIA spans
+  // (role="checkbox"/"radio", aria-checked="true|false"), not native
+  // inputs, and they rarely carry a distinguishing name/title. Position
+  // among all same-role elements on the screen is what's stable — SAP
+  // always renders a selection screen's widgets in the same order. The
+  // field is still called checkbox_index for schema back-compat; combined
+  // with dom.role it identifies either widget kind unambiguously.
   function checkboxIndex(el) {
-    if (!(el.getAttribute && el.getAttribute("role") === "checkbox")) return null;
+    const role = el.getAttribute && el.getAttribute("role");
+    if (role !== "checkbox" && role !== "radio") return null;
     try {
-      const all = [...document.querySelectorAll('[role="checkbox"]')];
+      const all = [...document.querySelectorAll('[role="' + role + '"]')];
       const i = all.indexOf(el);
       return i >= 0 ? i : null;
     } catch (e) { return null; }
@@ -262,6 +265,14 @@ _INJECT_JS = r"""
     if (el.getAttribute && el.getAttribute("role") === "checkbox") {
       const wasChecked = el.getAttribute("aria-checked") === "true";
       emit("set", ev, el, !wasChecked);
+      return;
+    }
+    // D-043: radio buttons get the same absolute-state treatment (SAP
+    // renders them as role="radio" ARIA spans too). Clicking a radio
+    // always means "select THIS one" — the end state is always true, and
+    // the group's previous selection clears itself.
+    if (el.getAttribute && el.getAttribute("role") === "radio") {
+      emit("set", ev, el, true);
       return;
     }
     emit("click", ev, el);
@@ -492,10 +503,12 @@ def describe_steps(steps: list[Step]) -> list[dict]:
             label = (f"scroll {int(v.get('dy', 0))}px" if "dy" in v
                      else f"scroll to {v.get('top', 0)}px")
         elif checkbox_i is not None:
-            label = f"checkbox #{checkbox_i}" + (f" ({label})" if label else "")
+            kind = t.dom.role if (t and t.dom and t.dom.role) else "checkbox"
+            label = f"{kind} #{checkbox_i}" + (f" ({label})" if label else "")
         value = s.value if not isinstance(s.value, dict) else None
         if s.act == Act.SET and isinstance(value, bool) and checkbox_i is not None:
-            value = "check" if value else "uncheck"
+            kind = t.dom.role if (t and t.dom and t.dom.role) else "checkbox"
+            value = ("select" if kind == "radio" else "check") if value else "uncheck"
         target = label or (t.sid if t else None) or "—"
         if low_confidence_label:
             target = f"⚠ {target}"

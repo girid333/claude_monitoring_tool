@@ -55,6 +55,10 @@ export default function Landscape() {
   const [viewingFlow, setViewingFlow] = useState<string | null>(null);
   const [flowDetail, setFlowDetail] = useState<FlowDetail | null>(null);
   const [flowDetailError, setFlowDetailError] = useState("");
+  // D-043: replay-time input edits — {flowId: {stepIndex: newValue}}.
+  // Edited in the step viewer, sent with Execute, applied in memory only
+  // (the saved recording is never modified).
+  const [overrides, setOverrides] = useState<Record<string, Record<string, string>>>({});
 
   const run = useRun();
 
@@ -134,7 +138,10 @@ export default function Landscape() {
           Core BASIS sweep <span style={{ color: "var(--text-3)" }}>(23 T-codes + SSH + URL checks → Word/PDF report)</span>
         </label>
         <button className="btn" disabled={!canRun}
-                onClick={() => run.startRun([...selected], { coreBasis, flows: [...pickedFlows] })}
+                onClick={() => run.startRun([...selected], {
+                  coreBasis, flows: [...pickedFlows],
+                  flowOverrides: overrides,     // D-043: replay-time input edits
+                })}
                 style={{ marginLeft: "auto" }}>
           {run.isRunning ? "Running…" : "Execute"}
         </button>
@@ -232,11 +239,23 @@ export default function Landscape() {
             {/* D-041: inline "what did this recording actually capture?" panel */}
             {viewingFlow && (
               <div className="panel" style={{ marginTop: 12, padding: "12px 14px", borderRadius: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 8, gap: 10 }}>
                   <div style={{ fontSize: 12.5, fontWeight: 600 }}>
                     Recorded steps — {viewingFlow}
                     {flowDetail && <span style={{ color: "var(--text-3)", fontWeight: 400 }}> · {flowDetail.step_count} steps</span>}
                   </div>
+                  {/* D-043: replay-time edit status */}
+                  {viewingFlow && Object.keys(overrides[viewingFlow] ?? {}).length > 0 && (
+                    <>
+                      <span style={{ fontSize: 11.5, color: "var(--orange)" }}>
+                        {Object.keys(overrides[viewingFlow] ?? {}).length} value(s) changed for next run
+                      </span>
+                      <button className="btn secondary" style={{ fontSize: 11, padding: "3px 8px" }}
+                              onClick={() => setOverrides(prev => {
+                                const n = { ...prev }; delete n[viewingFlow!]; return n;
+                              })}>Reset to recorded</button>
+                    </>
+                  )}
                   <span onClick={() => { setViewingFlow(null); setFlowDetail(null); }}
                         style={{ marginLeft: "auto", color: "var(--text-3)", cursor: "pointer", fontSize: 12.5 }}>close ✕</span>
                 </div>
@@ -259,17 +278,47 @@ export default function Landscape() {
                         </tr>
                       </thead>
                       <tbody>
-                        {flowDetail.steps.map((s, i) => (
-                          <tr key={i} style={{ borderTop: "1px solid var(--hairline)" }}>
-                            <td style={{ padding: "4px 8px 4px 0", color: "var(--text-3)" }}>{i}</td>
-                            <td style={{ padding: "4px 8px", fontWeight: 600 }}>{s.act}</td>
-                            <td style={{ padding: "4px 8px", wordBreak: "break-word" }}>{s.target}</td>
-                            <td style={{ padding: "4px 8px", color: "var(--text-2)", wordBreak: "break-word" }}>
-                              {s.value === null || s.value === undefined ? "" : String(s.value)}
-                            </td>
-                            <td style={{ padding: "4px 0", color: "var(--text-3)" }}>{s.resolved_by}</td>
-                          </tr>
-                        ))}
+                        {flowDetail.steps.map((s, i) => {
+                          const recorded = s.value === null || s.value === undefined ? "" : String(s.value);
+                          // D-043: SET steps are editable — a recording's
+                          // values are a template, not a contract. Toggle
+                          // values (check/uncheck/select) stay read-only for
+                          // now; free-text inputs are the real use case.
+                          const editable = s.act === "set"
+                            && !["check", "uncheck", "select"].includes(recorded);
+                          const edited = overrides[viewingFlow!]?.[String(i)];
+                          return (
+                            <tr key={i} style={{ borderTop: "1px solid var(--hairline)" }}>
+                              <td style={{ padding: "4px 8px 4px 0", color: "var(--text-3)" }}>{i}</td>
+                              <td style={{ padding: "4px 8px", fontWeight: 600 }}>{s.act}</td>
+                              <td style={{ padding: "4px 8px", wordBreak: "break-word" }}>{s.target}</td>
+                              <td style={{ padding: "4px 8px", color: "var(--text-2)", wordBreak: "break-word" }}>
+                                {editable ? (
+                                  <input className="input"
+                                         value={edited ?? recorded}
+                                         title="Change this value for the next replay (the recording itself is not modified)"
+                                         onChange={e => {
+                                           const v = e.target.value;
+                                           setOverrides(prev => {
+                                             const flowOv = { ...(prev[viewingFlow!] ?? {}) };
+                                             if (v === recorded) delete flowOv[String(i)];
+                                             else flowOv[String(i)] = v;
+                                             const n = { ...prev };
+                                             if (Object.keys(flowOv).length) n[viewingFlow!] = flowOv;
+                                             else delete n[viewingFlow!];
+                                             return n;
+                                           });
+                                         }}
+                                         style={{ width: "100%", fontSize: 12, padding: "3px 8px",
+                                                   ...(edited !== undefined
+                                                       ? { borderColor: "var(--orange)", color: "var(--orange)" }
+                                                       : {}) }} />
+                                ) : recorded}
+                              </td>
+                              <td style={{ padding: "4px 0", color: "var(--text-3)" }}>{s.resolved_by}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
