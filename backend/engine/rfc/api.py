@@ -134,6 +134,37 @@ def raw_call(req: RawCallRequest) -> dict:
     }
 
 
+# ── eCATT (D-046) ────────────────────────────────────────────────────────
+# Record happens in SECATT (SAP's own recorder); replay is triggered from
+# here. These endpoints answer the two questions that come first: is eCATT
+# permitted on this client at all, and what scripts already exist?
+
+@router.post("/ecatt/status")
+def ecatt_status_endpoint(req: SidRequest) -> dict:
+    from .ecatt import ecatt_status
+    return ecatt_status(_client_for(req.sid)).as_dict()
+
+
+class EcattListRequest(BaseModel):
+    sid: str
+    kind: str = "ECSC"      # ECSC=script, ECTC=configuration
+    limit: int = 500
+
+
+@router.post("/ecatt/objects")
+def ecatt_objects(req: EcattListRequest) -> dict:
+    from .ecatt import list_objects
+    client = _client_for(req.sid)
+    try:
+        return {"ok": True, "kind": req.kind.upper(),
+                "objects": list_objects(client, req.kind, req.limit)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RfcSoapError as exc:
+        return {"ok": False, "kind": req.kind.upper(), "objects": [],
+                "error": exc.message, "error_kind": exc.kind}
+
+
 @router.post("/run")
 def run_checks(req: RunRfcRequest) -> dict:
     client = _client_for(req.sid)

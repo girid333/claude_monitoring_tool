@@ -218,6 +218,35 @@ def _apply_table_rules(function: str, xml: str, request_body: str) -> str:
     return re.sub(rf"<{table}>.*?</{table}>", f"<{table}/>", xml, flags=re.S)
 
 
+# D-046: the SCC4 eCATT flag this fake client reports. Overridable via the
+# /ecatt-flag/<X> control path so a test can exercise BOTH the permitted and
+# the locked-down case — the latter being the realistic production default.
+ECATT_FLAG = "X"
+
+
+def _read_table_xml(fields: list[tuple[str, int]], rows: list[list[str]]) -> str:
+    """Build an RFC_READ_TABLE reply with correct FIELDS offsets + fixed-width
+    WA lines, so the client's real unpacking logic is exercised."""
+    offset, field_xml = 0, []
+    for name, length in fields:
+        field_xml.append(f"<item><FIELDNAME>{name}</FIELDNAME>"
+                          f"<OFFSET>{offset}</OFFSET><LENGTH>{length}</LENGTH></item>")
+        offset += length
+    data_xml = []
+    for row in rows:
+        line = "".join(str(v).ljust(ln) for v, (_, ln) in zip(row, fields))
+        data_xml.append(f"<item><WA>{line}</WA></item>")
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<soap-env:Envelope xmlns:soap-env="http://schemas.xmlsoap.org/soap/envelope/">
+<soap-env:Body>
+<rfc:RFC_READ_TABLE.Response xmlns:rfc="urn:sap-com:document:sap:rfc:functions">
+<FIELDS>{''.join(field_xml)}</FIELDS>
+<DATA>{''.join(data_xml)}</DATA>
+</rfc:RFC_READ_TABLE.Response>
+</soap-env:Body>
+</soap-env:Envelope>"""
+
+
 class H(BaseHTTPRequestHandler):
     def _send(self, body: str, status: int = 200) -> None:
         raw = body.encode()
@@ -226,6 +255,15 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def do_GET(self) -> None:
+        # test control: flip the simulated SCC4 eCATT restriction
+        global ECATT_FLAG
+        if self.path.startswith("/ecatt-flag/"):
+            ECATT_FLAG = self.path.rsplit("/", 1)[-1].replace("blank", " ")
+            self._send("<ok/>")
+            return
+        self._send("<html/>")
 
     def do_POST(self) -> None:
         # /inactive simulates the SICF service being switched off.
@@ -249,6 +287,21 @@ class H(BaseHTTPRequestHandler):
         # SNAP via RFC_READ_TABLE must fault exactly as a real system does.
         if "RFC_READ_TABLE" in body and "SNAP" in body:
             self._send(TABLE_NOT_AVAILABLE, 500)
+            return
+        # eCATT (D-046): T000 carries the SCC4 gate, TADIR lists the objects.
+        if "RFC_READ_TABLE" in body and "T000" in body:
+            self._send(_read_table_xml(
+                [("MANDT", 3), ("MTEXT", 25), ("CCCATEGORY", 1), ("CATTKENNZ", 1)],
+                [["100", "Home S/4", "C", ECATT_FLAG]]))
+            return
+        if "RFC_READ_TABLE" in body and "TADIR" in body:
+            kind = "ECTC" if "ECTC" in body else "ECSC"
+            names = ([["R3TR", kind, "Z_SM37_CHECK_CFG", "ZMON", "GIRID"]] if kind == "ECTC"
+                      else [["R3TR", kind, "Z_SM37_CHECK", "ZMON", "GIRID"],
+                            ["R3TR", kind, "Z_VA01_CREATE", "ZMON", "GIRID"]])
+            self._send(_read_table_xml(
+                [("PGMID", 4), ("OBJECT", 4), ("OBJ_NAME", 40),
+                 ("DEVCLASS", 30), ("AUTHOR", 12)], names))
             return
         for name, xml in RESPONSES.items():
             if name in body:
