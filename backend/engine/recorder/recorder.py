@@ -121,6 +121,28 @@ _INJECT_JS = r"""
     } catch (e) { return null; }
   }
 
+  // D-042: SAP's real date-range widgets (SM37's "Job Start Condition"
+  // From/To, for example) commonly give EVERY sub-field the same generic
+  // accessible label (e.g. aria-label="Input Field") — there's nothing
+  // attr-based to key on (nthAmongSimilar only fires for semanticAttr
+  // matches), so the resolver's label tier matched ".first" for every one
+  // of them: two recorded SET steps for two different date boxes both
+  // landed on the SAME box at replay, and the other silently kept SAP's
+  // default. This is the SAME shape of bug D-040 fixed for checkboxes,
+  // generalized: when the label ITSELF is ambiguous, position among
+  // same-tag/same-type elements sharing that identical label is the
+  // fallback identity.
+  function nthAmongLabel(el, label) {
+    if (!label) return null;
+    try {
+      const tag = el.tagName.toLowerCase();
+      const type = el.type || "";
+      const all = [...document.querySelectorAll(tag)].filter(e => (e.type || "") === type);
+      const matches = all.filter(e => labelFor(e) === label);
+      return matches.length > 1 ? matches.indexOf(el) : null;
+    } catch (e) { return null; }
+  }
+
   // D-040: SAP renders checkboxes as ARIA spans (role="checkbox",
   // aria-checked="true|false"), not native <input type="checkbox">, and they
   // rarely carry a distinguishing name/title. Position among all
@@ -137,16 +159,22 @@ _INJECT_JS = r"""
 
   function domMeta(el) {
     const txt = ((el.innerText !== undefined ? el.innerText : el.value) || "").trim();
+    const lbl = labelFor(el);
+    // D-042: attr-based disambiguation first (tier 1 is tried first at
+    // replay); only fall back to label-based disambiguation when there's
+    // no semantic attr at all, since that's the tier that will actually
+    // consume this nth value in that case.
+    const nth = nthAmongSimilar(el);
     return {
       attr: semanticAttr(el),
-      label: labelFor(el),
+      label: lbl,
       role: el.getAttribute ? el.getAttribute("role") : null,
       css_hint: cssHint(el),
       pos_id: el.id || null,
       text: txt ? txt.slice(0, 80) : null,
       tag: el.tagName ? el.tagName.toLowerCase() : null,
       input_type: el.type || null,
-      nth: nthAmongSimilar(el),
+      nth: nth !== null ? nth : nthAmongLabel(el, lbl),
       path: structuralPath(el),
       frame_url: location.href,
       checkbox_index: checkboxIndex(el),
@@ -165,6 +193,18 @@ _INJECT_JS = r"""
       });
     } catch (e) { /* never break the page being recorded */ }
   }
+
+  // D-042: remembers each field's value AS OF the moment it gained focus,
+  // so the blur listener below can tell "the user actually edited this"
+  // from "the user merely clicked in and back out again". Without this,
+  // just clicking into the (already-prefilled) Job Name field and
+  // clicking elsewhere recorded a phantom `set Job Name = "*"` step —
+  // visible in a real recording via the new step viewer (D-041).
+  const __focusVals = new WeakMap();
+  document.addEventListener("focusin", ev => {
+    const el = ev.target;
+    if (el && el.tagName === "INPUT") __focusVals.set(el, el.value);
+  }, true);
 
   document.addEventListener("change", ev => {
     const el = ev.target;
@@ -195,6 +235,13 @@ _INJECT_JS = r"""
     const name = el.getAttribute("name") || "";
     if (title === "Command Field" || name === "~OkCode"
         || (el.id || "").toLowerCase().indexOf("okcd") >= 0) return;
+    // D-042: only a REAL edit is worth a step. Without this check, merely
+    // clicking into a field and clicking away (its value unchanged since
+    // focus) recorded a phantom set — confirmed by a real recording shown
+    // through the new step viewer (`set Job Name = "*"`, `set User Name =
+    // "*"`, neither ever actually typed).
+    const before = __focusVals.has(el) ? __focusVals.get(el) : null;
+    if (before === el.value) return;
     emit("set", ev, el, el.value);
   }, true);
 
@@ -418,10 +465,22 @@ def describe_steps(steps: list[Step]) -> list[dict]:
     for s in steps:
         t = s.target
         label = None
+        low_confidence_label = False
         if t and t.dom:
             label = (t.dom.label or t.dom.text
                      or (list(t.dom.attr.values())[0] if t.dom.attr else None)
                      or t.dom.pos_id)
+            if not label:
+                # D-042: falling all the way through to "—" hides exactly
+                # the steps most worth scrutinizing — a target with no
+                # semantic identity at all is the weakest kind of match
+                # (bottom of the resolver's own priority order), and
+                # showing nothing made two such steps in a real recording
+                # impossible to tell apart or explain. css_hint/path are
+                # what the resolver actually falls back to for these, so
+                # show that instead of nothing.
+                label = t.dom.css_hint or t.dom.path
+                low_confidence_label = bool(label)
         checkbox_i = t.dom.checkbox_index if (t and t.dom) else None
         if s.act == Act.START_TCODE:
             label = f"T-code {s.value}"
@@ -437,9 +496,12 @@ def describe_steps(steps: list[Step]) -> list[dict]:
         value = s.value if not isinstance(s.value, dict) else None
         if s.act == Act.SET and isinstance(value, bool) and checkbox_i is not None:
             value = "check" if value else "uncheck"
+        target = label or (t.sid if t else None) or "—"
+        if low_confidence_label:
+            target = f"⚠ {target}"
         out.append({
             "act": s.act.value,
-            "target": label or (t.sid if t else None) or "—",
+            "target": target,
             "value": value,
             "resolved_by": ("scripting" if (t and t.sid)
                              else "dom" if t

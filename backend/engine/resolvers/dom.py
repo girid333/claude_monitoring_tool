@@ -48,30 +48,45 @@ class DomResolver(Resolver):
             if await self._usable(loc):
                 return Resolution(loc, 0.9, f"checkbox_index:{dom.checkbox_index}", self.name)
 
-        # Tier 1 — semantic attributes
+        # Tier 1 — semantic attributes. D-042: `nth` was captured
+        # (nthAmongSimilar) specifically to disambiguate when the same
+        # attr value matches multiple elements, but this tier hardcoded
+        # `.first` and never actually consulted it — a latent gap since
+        # D-033, now fixed alongside the same bug in tier 2.
         if dom.attr:
             selector = "".join(f'[{k}*="{v}"]' if k == "id" else f'[{k}="{v}"]'
                                for k, v in dom.attr.items())
-            loc = self.page.locator(selector).first
-            tried.append(f"attr:{selector}")
+            idx0 = dom.nth or 0
+            loc = self.page.locator(selector).nth(idx0)
+            tried.append(f"attr:{selector}#{idx0}")
             if await self._usable(loc):
-                return Resolution(loc, 0.95, f"attr:{selector}", self.name)
+                return Resolution(loc, 0.95, f"attr:{selector}#{idx0}", self.name)
 
-        # Tier 2 — role + accessible name / visible label
+        # Tier 2 — role + accessible name / visible label.
+        # D-042: `dom.nth` disambiguates when MULTIPLE elements share the
+        # identical label — SAP's own date-range widgets are the concrete
+        # case that surfaced this (e.g. both the "From" and "To" boxes in
+        # SM37's Job Start Condition carry the same generic aria-label).
+        # `.first` silently picked the SAME field for both recorded SET
+        # steps; only one of the two ever actually landed at replay.
+        idx = dom.nth or 0
         if dom.role and dom.label:
-            loc = self.page.get_by_role(dom.role, name=dom.label).first
-            tried.append(f"role:{dom.role}+label:{dom.label}")
-            if await self._usable(loc):
-                return Resolution(loc, 0.85, f"role:{dom.role}:{dom.label}", self.name)
+            loc = self.page.get_by_role(dom.role, name=dom.label)
+            cand = loc.nth(idx)
+            tried.append(f"role:{dom.role}+label:{dom.label}#{idx}")
+            if await self._usable(cand):
+                return Resolution(cand, 0.85, f"role:{dom.role}:{dom.label}#{idx}", self.name)
         if dom.label:
-            loc = self.page.get_by_label(dom.label).first
-            tried.append(f"label:{dom.label}")
-            if await self._usable(loc):
-                return Resolution(loc, 0.85, f"label:{dom.label}", self.name)
-            loc = self.page.get_by_text(dom.label, exact=True).first
-            tried.append(f"text:{dom.label}")
-            if await self._usable(loc):
-                return Resolution(loc, 0.80, f"text:{dom.label}", self.name)
+            loc = self.page.get_by_label(dom.label)
+            cand = loc.nth(idx)
+            tried.append(f"label:{dom.label}#{idx}")
+            if await self._usable(cand):
+                return Resolution(cand, 0.85, f"label:{dom.label}#{idx}", self.name)
+            loc = self.page.get_by_text(dom.label, exact=True)
+            cand = loc.nth(idx)
+            tried.append(f"text:{dom.label}#{idx}")
+            if await self._usable(cand):
+                return Resolution(cand, 0.80, f"text:{dom.label}#{idx}", self.name)
 
         # Tier 2b — D-033: visible text of the element itself (buttons, tabs,
         # tree nodes and table cells are overwhelmingly identified this way in
