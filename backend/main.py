@@ -98,6 +98,14 @@ app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
 from engine.agent_hub import router as sapgui_router  # noqa: E402
 app.include_router(sapgui_router)
 
+# D-045: RFC-over-SOAP checks (/api/rfc/*). Same additive pattern — its own
+# module under engine/rfc/, mounted with one line, no existing code path
+# altered. Needs no pyrfc/NW RFC SDK: it talks to SAP's /sap/bc/soap/rfc
+# service over plain HTTP, reusing each system's existing webgui_url host
+# and stored SAP credential.
+from engine.rfc.api import router as rfc_router  # noqa: E402
+app.include_router(rfc_router)
+
 store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}
 
