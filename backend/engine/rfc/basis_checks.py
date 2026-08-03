@@ -470,13 +470,26 @@ def run_job_check(client: RfcSoapClient, max_jobs: int = 200) -> CheckResult:
 
 def run_all(client: RfcSoapClient, check_ids: Optional[list[str]] = None) -> list[CheckResult]:
     """Run every check (or a chosen subset). One check failing never stops
-    the others — the D-040 per-flow isolation lesson, applied here."""
+    the others — the D-040 per-flow isolation lesson, applied here.
+
+    NOTE on XBP (`background_jobs`): it is NOT part of the default sweep —
+    it only runs when explicitly named in `check_ids`. Once
+    EXTERNAL_USER_NAME was supplied it did start returning data, but on the
+    live system it ignored both MAX_SELECT and the date window (5107 rows
+    for a 2-day request) and its BAPIXMJOB field names don't match the ones
+    used here, so Status/User/dates rendered blank and zero cancelled jobs
+    were detected. The TBTCO check (`job_table`) covers exactly the same
+    ground, is verified correct on release 758, respects the date window,
+    and correctly found 183 cancelled jobs. Shipping both would mean
+    shipping a broken duplicate, so XBP is retained for opt-in use and for
+    future job CONTROL features (start/stop, which TBTCO cannot do) rather
+    than removed outright."""
     results: list[CheckResult] = []
     for check in CHECKS:
         if check_ids and check.check_id not in check_ids:
             continue
         results.append(check.run(client))
-    if not check_ids or "background_jobs" in check_ids:
+    if check_ids and "background_jobs" in check_ids:
         results.append(run_job_check(client))
     return results
 
@@ -485,8 +498,12 @@ def describe_checks() -> list[dict]:
     out = [{"check_id": c.check_id, "title": c.title, "tcode": c.tcode,
             "function": c.function, "confidence": c.confidence, "note": c.note}
            for c in CHECKS]
-    out.append({"check_id": "background_jobs", "title": "Background jobs", "tcode": "SM37",
-                "function": "BAPI_XBP_JOB_SELECT", "confidence": "verified",
-                "note": "Uses the documented XBP external interface; needs an XMI "
-                        "logon/logoff around the call."})
+    out.append({"check_id": "background_jobs", "title": "Background jobs (XBP)",
+                "tcode": "SM37", "function": "BAPI_XBP_JOB_SELECT",
+                "confidence": "unverified", "default": False,
+                "note": "Opt-in. XBP connects, but on release 758 it ignored MAX_SELECT "
+                        "and the date window (returned 5107 rows) and its field names "
+                        "differ, so status/user/dates come back blank. Use 'Background "
+                        "jobs (last 2 days)' instead — it reads TBTCO directly and is "
+                        "verified correct. Kept for future job control (start/stop)."})
     return out

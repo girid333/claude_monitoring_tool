@@ -21,6 +21,7 @@ type SystemRow = { sid: string; system_name?: string };
 type CheckMeta = {
   check_id: string; title: string; tcode: string;
   function: string; confidence: string; note: string;
+  default?: boolean;   // false => opt-in, not selected on load
 };
 type CheckResult = {
   check_id: string; title: string; ok: boolean;
@@ -65,7 +66,8 @@ export default function RfcPage() {
     }).catch(err => setError(`Could not reach the backend at ${API}: ${err}`));
     fetch(`${API}/api/rfc/checks`).then(r => r.json()).then((c: CheckMeta[]) => {
       setChecks(c);
-      setSelected(new Set(c.map(x => x.check_id)));
+      // Opt-in checks (default === false) start unticked — see the XBP note.
+      setSelected(new Set(c.filter(x => x.default !== false).map(x => x.check_id)));
     }).catch(() => {});
   }, []);
 
@@ -221,6 +223,12 @@ export default function RfcPage() {
                     fontSize: 10, marginLeft: 6, padding: "1px 5px", borderRadius: 4,
                     background: "rgba(255,159,10,.16)", color: "var(--orange,#FF9F0A)",
                   }}>unverified</span>
+                )}
+                {c.default === false && (
+                  <span title={c.note} style={{
+                    fontSize: 10, marginLeft: 6, padding: "1px 5px", borderRadius: 4,
+                    background: "rgba(255,255,255,.08)", color: "var(--text-3)",
+                  }}>opt-in</span>
                 )}
                 <span style={{ display: "block", fontSize: 10.5, color: "var(--text-3)" }}>
                   {c.function}

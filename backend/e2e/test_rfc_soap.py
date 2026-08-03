@@ -154,8 +154,14 @@ try:
 
     # ---- 15-16. run_all: isolation + no silent success ----
     results = basis_checks.run_all(client)
-    check("15. run_all returns every registered check", len(results) == len(basis_checks.CHECKS) + 1,
+    check("15. run_all returns every DEFAULT check (XBP is opt-in, excluded)",
+          len(results) == len(basis_checks.CHECKS)
+          and not any(r.check_id == "background_jobs" for r in results),
           [r.check_id for r in results])
+    opt_in = basis_checks.run_all(client, ["background_jobs"])
+    check("15b. XBP still runs when explicitly requested",
+          len(opt_in) == 1 and opt_in[0].check_id == "background_jobs",
+          [r.check_id for r in opt_in])
     failed = [r for r in results if not r.ok]
     check("16. All checks pass against the fake system",
           not failed, [(r.check_id, r.error) for r in failed])

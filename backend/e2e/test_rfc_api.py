@@ -85,12 +85,16 @@ try:
     by_id = {x["check_id"]: x for x in body["checks"]}
     check("9. SM50 work processes returned", len(by_id["work_processes"]["rows"]) == 3,
           by_id["work_processes"])
-    check("10. SM37 jobs returned via XBP", len(by_id["background_jobs"]["rows"]) == 2,
-          by_id["background_jobs"])
+    check("10. SM37 jobs returned via the TBTCO table read (XBP not in default sweep)",
+          "background_jobs" not in by_id and len(by_id["job_table"]["rows"]) == 2,
+          list(by_id))
     check("11. Cancelled job surfaced as an anomaly",
           body["anomaly_count"] >= 1 and
-          any("CANCELLED" in a for a in by_id["background_jobs"]["anomalies"]),
+          any("CANCELLED" in a for a in by_id["job_table"]["anomalies"]),
           body["anomaly_count"])
+    r = c.post("/api/rfc/run", json={"sid": "F4H", "check_ids": ["background_jobs"]})
+    check("11b. XBP still available on explicit request",
+          r.json()["checks"][0]["check_id"] == "background_jobs", r.text[:200])
 
     r = c.post("/api/rfc/run", json={"sid": "F4H", "check_ids": ["system_info"]})
     check("12. check_ids filters the sweep to just that check",
