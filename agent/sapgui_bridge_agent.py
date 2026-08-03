@@ -373,9 +373,33 @@ async def run_agent(server: str, code: str, use_fake: bool) -> None:
         hb = asyncio.create_task(heartbeat_loop())
 
         async def poll_loop(job_id: str):
+            """THE FIX: this used to have no error handling at all. It's
+            launched fire-and-forget via asyncio.create_task() — if
+            engine.record_poll() ever threw (SAP GUI's COM interface
+            commonly does this transiently while it's mid-processing a
+            keystroke), the ENTIRE polling loop died silently and recording
+            stayed frozen at whatever step count it had, forever, with
+            nothing visible anywhere: no crash, no error, no clue. This is
+            almost certainly why the baseline snapshot could report 130 real
+            elements yet the step count never moved even while typing.
+            Now a poll failure is reported once (and periodically after, so
+            it's not lost) and the loop keeps retrying on the next tick
+            instead of dying."""
+            consecutive_errors = 0
             while True:
                 await asyncio.sleep(POLL_INTERVAL_S)
-                for step in engine.record_poll():
+                try:
+                    steps = engine.record_poll()
+                except Exception as exc:  # noqa: BLE001
+                    consecutive_errors += 1
+                    if consecutive_errors == 1 or consecutive_errors % 20 == 0:
+                        await ws.send(json.dumps({
+                            "kind": "poll_error", "job_id": job_id,
+                            "error": f"poll #{consecutive_errors} failed: {exc}",
+                        }))
+                    continue
+                consecutive_errors = 0
+                for step in steps:
                     await ws.send(json.dumps({"kind": "step", "job_id": job_id, "step": step}))
 
         try:
