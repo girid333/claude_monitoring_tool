@@ -17,6 +17,10 @@ type FlowInfo = {
   flow_id: string; description: string; step_count: number;
   tcodes: string[]; has_capture: boolean;
 };
+type FlowStep = { act: string; target: string; value: unknown; resolved_by: string };
+type FlowDetail = {
+  flow_id: string; description: string; step_count: number; steps: FlowStep[];
+};
 type SystemRow = {
   sid: string; system_name?: string; release_tag: string; auth: string; tags: string[];
   last_run: { ok: boolean; flow_id: string; checks: { ok: boolean; severity: string }[] } | null;
@@ -45,6 +49,12 @@ export default function Landscape() {
   const [pickedFlows, setPickedFlows] = useState<Set<string>>(new Set());
   const [flowQuery, setFlowQuery] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // D-041: "what did this recording actually capture?" — Giri asked to see
+  // the recorded content directly rather than inferring it from a replayed
+  // report, so a step can be pinpointed as missing vs. just misresolving.
+  const [viewingFlow, setViewingFlow] = useState<string | null>(null);
+  const [flowDetail, setFlowDetail] = useState<FlowDetail | null>(null);
+  const [flowDetailError, setFlowDetailError] = useState("");
 
   const run = useRun();
 
@@ -71,10 +81,26 @@ export default function Landscape() {
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       setFlowLib(prev => prev.filter(f => f.flow_id !== flowId));
       setPickedFlows(prev => { const n = new Set(prev); n.delete(flowId); return n; });
+      if (viewingFlow === flowId) { setViewingFlow(null); setFlowDetail(null); }
     } catch (err) {
       setLoadError(`Could not delete ${flowId}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setConfirmDelete(null);
+    }
+  };
+
+  // D-041: toggle the inline "what did this recording capture?" panel.
+  const viewSteps = async (flowId: string) => {
+    if (viewingFlow === flowId) { setViewingFlow(null); setFlowDetail(null); return; }
+    setViewingFlow(flowId);
+    setFlowDetail(null);
+    setFlowDetailError("");
+    try {
+      const res = await fetch(`${API}/api/flows/${encodeURIComponent(flowId)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      setFlowDetail(await res.json());
+    } catch (err) {
+      setFlowDetailError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -178,6 +204,11 @@ export default function Landscape() {
                           {f.tcodes.length ? f.tcodes.join(",") : `${f.step_count} steps`}
                         </span>
                       </span>
+                      {/* D-041: see exactly what this recording captured */}
+                      <span onClick={() => viewSteps(f.flow_id)}
+                            title="View recorded steps"
+                            style={{ color: viewingFlow === f.flow_id ? "var(--blue)" : "var(--text-3)",
+                                      cursor: "pointer", paddingLeft: 2 }}>👁</span>
                       {/* D-036: delete a recording */}
                       {confirming ? (
                         <>
@@ -195,6 +226,54 @@ export default function Landscape() {
                     </span>
                   );
                 })}
+              </div>
+            )}
+
+            {/* D-041: inline "what did this recording actually capture?" panel */}
+            {viewingFlow && (
+              <div className="panel" style={{ marginTop: 12, padding: "12px 14px", borderRadius: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600 }}>
+                    Recorded steps — {viewingFlow}
+                    {flowDetail && <span style={{ color: "var(--text-3)", fontWeight: 400 }}> · {flowDetail.step_count} steps</span>}
+                  </div>
+                  <span onClick={() => { setViewingFlow(null); setFlowDetail(null); }}
+                        style={{ marginLeft: "auto", color: "var(--text-3)", cursor: "pointer", fontSize: 12.5 }}>close ✕</span>
+                </div>
+                {flowDetailError && (
+                  <div style={{ fontSize: 12, color: "var(--red)" }}>Could not load: {flowDetailError}</div>
+                )}
+                {!flowDetail && !flowDetailError && (
+                  <div className="rsub">Loading…</div>
+                )}
+                {flowDetail && (
+                  <div style={{ maxHeight: 260, overflowY: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ color: "var(--text-3)", textAlign: "left" }}>
+                          <th style={{ padding: "3px 8px 3px 0", fontWeight: 500, width: 32 }}>#</th>
+                          <th style={{ padding: "3px 8px", fontWeight: 500, width: 90 }}>action</th>
+                          <th style={{ padding: "3px 8px", fontWeight: 500 }}>target</th>
+                          <th style={{ padding: "3px 8px", fontWeight: 500 }}>value</th>
+                          <th style={{ padding: "3px 0", fontWeight: 500, width: 80 }}>resolved by</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {flowDetail.steps.map((s, i) => (
+                          <tr key={i} style={{ borderTop: "1px solid var(--hairline)" }}>
+                            <td style={{ padding: "4px 8px 4px 0", color: "var(--text-3)" }}>{i}</td>
+                            <td style={{ padding: "4px 8px", fontWeight: 600 }}>{s.act}</td>
+                            <td style={{ padding: "4px 8px", wordBreak: "break-word" }}>{s.target}</td>
+                            <td style={{ padding: "4px 8px", color: "var(--text-2)", wordBreak: "break-word" }}>
+                              {s.value === null || s.value === undefined ? "" : String(s.value)}
+                            </td>
+                            <td style={{ padding: "4px 0", color: "var(--text-3)" }}>{s.resolved_by}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
           </>

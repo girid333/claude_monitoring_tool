@@ -172,6 +172,32 @@ _INJECT_JS = r"""
     emit("set", ev, el, v);
   }, true);
 
+  // D-041: redundant capture on blur, for text/date-style fields. 'change'
+  // SHOULD already fire on blur for a modified <input>, but this is a
+  // cheap, harmless safety net for any SAP field whose value gets set by a
+  // helper widget (e.g. a calendar-icon date picker) in a way that doesn't
+  // reliably dispatch a native 'change'. 'blur' doesn't bubble, so this has
+  // to be a capture-phase listener on document (still fires top-down).
+  // Coalescing in _coalesce() already collapses a change+blur pair on the
+  // same field into a single SET step, so this can't double-record.
+  document.addEventListener("blur", ev => {
+    const el = ev.target;
+    if (!el || !el.tagName || el.tagName !== "INPUT") return;
+    if (["text", "search"].indexOf(el.type) < 0) return;
+    // Never the OK-code/command field: it's ALWAYS tool-driven (T-code
+    // navigation writes and submits it programmatically — tcode_nav.py
+    // uses these exact three signals to find it), and it gets focused +
+    // blurred as a side effect of that navigation even while the recorder
+    // is paused. A stray blur landing just after resume() produced a
+    // phantom "set okcd" step ahead of the real recorded action — caught
+    // by test_tcode_capture_flows.py's step count regressing from 4 to 5.
+    const title = el.getAttribute("title") || "";
+    const name = el.getAttribute("name") || "";
+    if (title === "Command Field" || name === "~OkCode"
+        || (el.id || "").toLowerCase().indexOf("okcd") >= 0) return;
+    emit("set", ev, el, el.value);
+  }, true);
+
   document.addEventListener("click", ev => {
     const el = (ev.target.closest && ev.target.closest(
       "button,[role=button],a,input[type=submit],input[type=button]," +
@@ -256,33 +282,7 @@ class Recorder:
 
     def steps_preview(self) -> list[dict]:
         """Human-readable step list for the live recorder UI (D-033)."""
-        out = []
-        for s in self._coalesce(self.events):
-            t = s.target
-            label = None
-            if t and t.dom:
-                label = (t.dom.label or t.dom.text
-                         or (list(t.dom.attr.values())[0] if t.dom.attr else None)
-                         or t.dom.pos_id)
-            if s.act == Act.START_TCODE:
-                label = f"T-code {s.value}"
-            elif s.act == Act.CAPTURE:
-                label = (f"screenshot — all pages (max {s.pages})" if s.pages
-                         else "screenshot")
-            elif s.act == Act.SCROLL:
-                v = s.value if isinstance(s.value, dict) else {}
-                label = (f"scroll {int(v.get('dy', 0))}px" if "dy" in v
-                         else f"scroll to {v.get('top', 0)}px")
-            out.append({
-                "act": s.act.value,
-                "target": label or (t.sid if t else None) or "—",
-                "value": s.value if not isinstance(s.value, dict) else None,
-                "resolved_by": ("scripting" if (t and t.sid)
-                                 else "dom" if t
-                                 else "manual" if s.act in (Act.START_TCODE, Act.CAPTURE)
-                                 else "n/a"),
-            })
-        return out
+        return describe_steps(self._coalesce(self.events))
 
     # ── D-034: manually injected steps ──────────────────────────────────
     # Recorded flows need two things the DOM can't tell us: where the flow
@@ -406,6 +406,47 @@ def _same_target(a: Target, b: Target) -> bool:
         key_a, key_b = a.dom.pos_id or a.dom.path, b.dom.pos_id or b.dom.path
         return key_a is not None and key_a == key_b
     return False
+
+
+def describe_steps(steps: list[Step]) -> list[dict]:
+    """D-041: human-readable step list, usable for BOTH a live in-progress
+    recording (Recorder.steps_preview) AND a already-saved flow loaded back
+    off disk (main.py's flow-detail endpoint) — Giri asked to be able to see
+    exactly what got recorded for a saved flow, not just while recording, so
+    this needed to stop being a Recorder-only method."""
+    out = []
+    for s in steps:
+        t = s.target
+        label = None
+        if t and t.dom:
+            label = (t.dom.label or t.dom.text
+                     or (list(t.dom.attr.values())[0] if t.dom.attr else None)
+                     or t.dom.pos_id)
+        checkbox_i = t.dom.checkbox_index if (t and t.dom) else None
+        if s.act == Act.START_TCODE:
+            label = f"T-code {s.value}"
+        elif s.act == Act.CAPTURE:
+            label = (f"screenshot — all pages (max {s.pages})" if s.pages
+                     else "screenshot")
+        elif s.act == Act.SCROLL:
+            v = s.value if isinstance(s.value, dict) else {}
+            label = (f"scroll {int(v.get('dy', 0))}px" if "dy" in v
+                     else f"scroll to {v.get('top', 0)}px")
+        elif checkbox_i is not None:
+            label = f"checkbox #{checkbox_i}" + (f" ({label})" if label else "")
+        value = s.value if not isinstance(s.value, dict) else None
+        if s.act == Act.SET and isinstance(value, bool) and checkbox_i is not None:
+            value = "check" if value else "uncheck"
+        out.append({
+            "act": s.act.value,
+            "target": label or (t.sid if t else None) or "—",
+            "value": value,
+            "resolved_by": ("scripting" if (t and t.sid)
+                             else "dom" if t
+                             else "manual" if s.act in (Act.START_TCODE, Act.CAPTURE)
+                             else "n/a"),
+        })
+    return out
 
 
 def save_flow(flow: Flow, directory: str | Path = "flows") -> Path:

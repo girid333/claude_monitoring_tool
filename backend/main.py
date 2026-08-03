@@ -600,6 +600,28 @@ def list_flows() -> list[dict]:
     return out
 
 
+@app.get("/api/flows/{flow_id}")
+def flow_detail(flow_id: str) -> dict:
+    """D-041: the full recorded step list for one saved flow, human-readable
+    — Giri asked to be able to see what actually got captured for a
+    recording so he can tell us precisely what's missing, instead of us
+    guessing from a screenshot of the replayed report."""
+    if "/" in flow_id or "\\" in flow_id or flow_id.startswith("."):
+        raise HTTPException(400, "invalid flow_id")
+    p = Path(FLOWS_DIR) / f"{flow_id}.json"
+    if not p.exists():
+        raise HTTPException(404, "flow not found")
+    from engine.recorder.recorder import describe_steps
+    from engine.schema import Flow
+    data = json.loads(p.read_text())
+    flow = Flow(**data)
+    return {
+        "flow_id": flow.flow_id, "description": flow.description,
+        "applies_to": flow.applies_to, "step_count": len(flow.steps),
+        "steps": describe_steps(flow.steps),
+    }
+
+
 @app.delete("/api/flows/{flow_id}")
 def delete_flow(flow_id: str) -> dict:
     # Guard against path traversal — flow_id comes straight off the URL.
