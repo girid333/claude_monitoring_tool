@@ -35,7 +35,7 @@ with sync_playwright() as p:
     pg.wait_for_timeout(300)
 
     # open the data-run panel from the flow chip
-    pg.click("span[title^='Run with data']")
+    pg.click("span[title^='Replay this recording']")
     pg.wait_for_selector("text=Run with data —", timeout=10000)
     check("2. Data-run panel opens for the recording", True)
     # bindings are fetched asynchronously — wait for the table, don't race it

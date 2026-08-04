@@ -244,6 +244,17 @@ export default function Landscape() {
             + Record a new flow
           </a>
         </div>
+        {/* D-049: the data-run feature was invisible when it was only a bare
+            glyph on each chip — say plainly that it exists and where. */}
+        <div style={{ fontSize: 11.5, color: "var(--text-3)", marginBottom: 10 }}>
+          Tick a recording to replay it with <b>Execute</b>, or use{" "}
+          <span style={{ padding: "1px 6px", borderRadius: 999, fontSize: 10.5,
+                          fontWeight: 600, border: "1px solid var(--hairline)",
+                          color: "var(--text-2)" }}>▦ data run</span>{" "}
+          on a recording to replay it once per row of a spreadsheet and produce an
+          evidence document. The recording must have been made using the Recorder&apos;s
+          &quot;Start at T-code&quot; field.
+        </div>
 
         {flowLib.length === 0 ? (
           <div className="rsub">
@@ -301,11 +312,20 @@ export default function Landscape() {
                             title="View recorded steps"
                             style={{ color: viewingFlow === f.flow_id ? "var(--blue)" : "var(--text-3)",
                                       cursor: "pointer", paddingLeft: 2 }}>👁</span>
-                      {/* D-049: replay this recording once per row of a data sheet */}
+                      {/* D-049: replay this recording once per row of a data sheet.
+                          Deliberately a LABELLED pill, not a bare glyph — the first
+                          version used "▦" with only a tooltip and was undiscoverable;
+                          Giri couldn't find the feature at all. */}
                       <span onClick={() => openDataRun(f.flow_id)}
-                            title="Run with data — replay this recording once per spreadsheet row and produce an evidence document"
-                            style={{ color: dataRunFlow === f.flow_id ? "var(--blue)" : "var(--text-3)",
-                                      cursor: "pointer", paddingLeft: 2 }}>▦</span>
+                            title="Replay this recording once per spreadsheet row and produce an evidence document for auditors/testers"
+                            style={{
+                              marginLeft: 4, padding: "1px 7px", borderRadius: 999,
+                              fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap",
+                              cursor: "pointer",
+                              border: `1px solid ${dataRunFlow === f.flow_id ? "var(--blue)" : "var(--hairline)"}`,
+                              background: dataRunFlow === f.flow_id ? "var(--blue)" : "transparent",
+                              color: dataRunFlow === f.flow_id ? "#fff" : "var(--text-2)",
+                            }}>▦ data run</span>
                       {/* D-036: delete a recording */}
                       {confirming ? (
                         <>
