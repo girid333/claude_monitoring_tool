@@ -197,6 +197,32 @@ def odata_metadata(req: ODataMetadataRequest) -> dict:
     return fetch_metadata(_client_for(req.sid), req.service).as_dict()
 
 
+class ODataProbeRequest(BaseModel):
+    sid: str
+    limit: int = 200
+    only_usable: bool = False
+
+
+@router.post("/odata/probe")
+def odata_probe(req: ODataProbeRequest) -> dict:
+    """Which registered OData services can actually be called?
+
+    A Gateway catalogue lists what's REGISTERED. On a hub, many services
+    have no system alias and cannot be routed, so this separates the
+    usable ones from the rest before any flow is built against them."""
+    from ..apiflow.discovery import discover_odata
+    from ..apiflow.odata import probe_services
+    client = _client_for(req.sid)
+    available, services, note = discover_odata(client, req.limit)
+    if not available:
+        return {"ok": False, "note": note, "total": 0, "usable_count": 0,
+                "by_state": {}, "services": []}
+    result = probe_services(client, services)
+    if req.only_usable:
+        result["services"] = [s for s in result["services"] if s["state"] == "usable"]
+    return {"ok": True, **result}
+
+
 class ODataReadRequest(BaseModel):
     sid: str
     service: str

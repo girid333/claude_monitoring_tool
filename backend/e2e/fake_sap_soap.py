@@ -274,6 +274,11 @@ ALERT_ROWS = """{"d":{"results":[
 ODATA_ERROR = """{"error":{"code":"SY/530",
  "message":{"lang":"en","value":"Not authorized for entity set ForbiddenSet"}}}"""
 
+# The exact shape SAP returned on the live F4H system for a service that is
+# in the catalogue but has no Gateway routing configured.
+NO_SYSTEM_ALIAS = """{"error":{"code":"/IWFND/CM_MGW/143","message":{"lang":"en",
+ "value":"No System Alias found for Service 'ALERTINBOX_0001' and user 'GIRI'"}}}"""
+
 CATALOG_JSON = """{"d":{"results":[
 {"ID":"ZSD_SALESORDER_SRV_0001","Title":"Sales Order Management",
  "TechnicalServiceName":"ZSD_SALESORDER_SRV","TechnicalServiceVersion":1,
@@ -329,7 +334,18 @@ class H(BaseHTTPRequestHandler):
             self._send("<ok/>")
             return
         # D-047b: $metadata for a service, and entity-set reads.
-        if self.path.endswith("$metadata") or "$metadata" in self.path:
+        if "$metadata" in self.path:
+            # Reproduce the exact live F4H failure: registered in the
+            # catalogue but with no Gateway system alias, so uncallable.
+            if "NOALIAS" in self.path:
+                self._send_json(NO_SYSTEM_ALIAS, 500)
+                return
+            if "FORBIDDEN_SRV" in self.path:
+                self._send_json(ODATA_ERROR, 403)
+                return
+            if "MISSING_SRV" in self.path:
+                self._send_json('{"error":{"message":{"value":"Not found"}}}', 404)
+                return
             self._send_xml(SERVICE_METADATA)
             return
         if "/AlertSet" in self.path:

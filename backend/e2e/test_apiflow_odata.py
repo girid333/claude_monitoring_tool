@@ -100,6 +100,49 @@ try:
     d = md.as_dict()
     check("18. as_dict() is API-ready with counts and full operation detail",
           d["ok"] and d["count"] == 3 and d["operations"][0]["properties"], d["count"])
+
+    # ---- 19-24: THE LIVE F4H FAILURE — registered but not routable ----
+    noalias = odata.fetch_metadata(client, "/sap/opu/odata/sap/NOALIAS_SRV")
+    check("19. 'No System Alias' surfaces SAP's own message, not a bare HTTP 500",
+          not noalias.ok and "No System Alias found" in noalias.error, noalias.error)
+    check("20. ...and is classified as its own distinct state",
+          noalias.state == "no_system_alias", noalias.state)
+    check("21. ...and names the exact fix (/IWFND/MAINT_SERVICE, Add System Alias)",
+          "/IWFND/MAINT_SERVICE" in noalias.error and "Add System Alias" in noalias.error,
+          noalias.error)
+
+    forb = odata.fetch_metadata(client, "/sap/opu/odata/sap/FORBIDDEN_SRV")
+    check("22. Authorization failure classified separately from routing failure",
+          forb.state == "unauthorized" and "Not authorized" in forb.error, forb.as_dict())
+    miss = odata.fetch_metadata(client, "/sap/opu/odata/sap/MISSING_SRV")
+    check("23. Missing service classified as not_found", miss.state == "not_found",
+          miss.as_dict())
+
+    # ---- 24-27: probing the whole catalogue ----
+    catalogue = [
+        {"service": "ALERTINBOX", "url": "/sap/opu/odata/sap/ALERTINBOX"},
+        {"service": "NOALIAS_SRV", "url": "/sap/opu/odata/sap/NOALIAS_SRV"},
+        {"service": "FORBIDDEN_SRV", "url": "/sap/opu/odata/sap/FORBIDDEN_SRV"},
+        {"service": "MISSING_SRV", "url": "/sap/opu/odata/sap/MISSING_SRV"},
+    ]
+    probe = odata.probe_services(client, catalogue)
+    check("24. Probe separates the usable services from the rest",
+          probe["total"] == 4 and probe["usable_count"] == 1, probe["by_state"])
+    check("25. Each state counted so the scale of the problem is visible",
+          probe["by_state"].get("no_system_alias") == 1
+          and probe["by_state"].get("unauthorized") == 1
+          and probe["by_state"].get("not_found") == 1, probe["by_state"])
+    check("26. Usable services sorted first, with their operation count",
+          probe["services"][0]["state"] == "usable"
+          and probe["services"][0]["operations"] == 3, probe["services"][0])
+    check("27. Every entry carries an actionable detail, not just a state",
+          all(s.get("detail") for s in probe["services"]),
+          [s.get("detail", "")[:40] for s in probe["services"]])
+
+    all_dead = odata.probe_services(client, [catalogue[1]])
+    check("28. If nothing is usable, the note explains the likely cause",
+          all_dead["usable_count"] == 0 and "system alias" in all_dead["note"].lower(),
+          all_dead["note"])
 finally:
     srv.terminate()
 
