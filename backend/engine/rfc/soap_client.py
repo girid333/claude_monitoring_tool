@@ -269,6 +269,28 @@ class RfcSoapClient:
 
         return parse_response(resp.content, function), resp.content
 
+    def http_get(self, path: str, params: Optional[dict] = None,
+                  accept: str = "application/json") -> tuple[int, str]:
+        """Plain HTTP GET against the SAME ICM host, reusing the same session
+        and credentials as the RFC calls.
+
+        D-047: the OData/Gateway surface lives on this host too
+        (/sap/opu/odata/...), so discovering and later calling those services
+        needs no new configuration, no second credential, and no extra
+        connectivity — exactly the property that made the SOAP-RFC approach
+        work. Returns (status_code, text) rather than raising, because a 404
+        here is a meaningful ANSWER ("Gateway isn't active on this system"),
+        not an error to be swallowed."""
+        base = self.target.soap_url.split("/sap/bc/soap/rfc")[0]
+        url = base + (path if path.startswith("/") else "/" + path)
+        merged = {"sap-client": self.target.client}
+        merged.update(params or {})
+        try:
+            resp = self._http.get(url, params=merged, headers={"Accept": accept})
+        except httpx.RequestError as exc:
+            raise RfcSoapError(f"GET {url} failed: {exc}", kind="transport") from exc
+        return resp.status_code, resp.text
+
     def ping(self) -> dict[str, Any]:
         """Connection test. RFC_SYSTEM_INFO is present on every ABAP system
         and needs no parameters, which makes it the cleanest probe of

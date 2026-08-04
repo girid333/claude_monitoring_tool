@@ -165,6 +165,26 @@ def ecatt_objects(req: EcattListRequest) -> dict:
                 "error": exc.message, "error_kind": exc.kind}
 
 
+# ── API-flow capability discovery (D-047) ────────────────────────────────
+
+class DiscoverRequest(BaseModel):
+    sid: str
+    rfc_pattern: str = ""
+    custom_only: bool = False
+    limit: int = 200
+
+
+@router.post("/discover")
+def discover_capabilities(req: DiscoverRequest) -> dict:
+    """What can this system actually be driven through? Answers the
+    Fiori-vs-classic question with real data and supplies the operation
+    catalogue that flows get composed from."""
+    from ..apiflow.discovery import discover
+    client = _client_for(req.sid)
+    cat = discover(client, req.rfc_pattern, req.custom_only, req.limit)
+    return {"sid": req.sid, **cat.as_dict()}
+
+
 @router.post("/run")
 def run_checks(req: RunRfcRequest) -> dict:
     client = _client_for(req.sid)

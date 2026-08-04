@@ -223,6 +223,20 @@ def _apply_table_rules(function: str, xml: str, request_body: str) -> str:
 # the locked-down case — the latter being the realistic production default.
 ECATT_FLAG = "X"
 
+# D-047: whether this fake system has an active Fiori/Gateway layer. Both
+# states are real-world: plenty of systems have no Gateway at all, and the
+# tool must say so plainly rather than appear broken.
+GATEWAY_ACTIVE = True
+
+CATALOG_JSON = """{"d":{"results":[
+{"ID":"ZSD_SALESORDER_SRV_0001","Title":"Sales Order Management",
+ "TechnicalServiceName":"ZSD_SALESORDER_SRV","TechnicalServiceVersion":1,
+ "ServiceUrl":"/sap/opu/odata/sap/ZSD_SALESORDER_SRV"},
+{"ID":"API_BUSINESS_PARTNER_0001","Title":"Business Partner",
+ "TechnicalServiceName":"API_BUSINESS_PARTNER","TechnicalServiceVersion":1,
+ "ServiceUrl":"/sap/opu/odata/sap/API_BUSINESS_PARTNER"}
+]}}"""
+
 
 def _read_table_xml(fields: list[tuple[str, int]], rows: list[list[str]]) -> str:
     """Build an RFC_READ_TABLE reply with correct FIELDS offsets + fixed-width
@@ -258,12 +272,32 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         # test control: flip the simulated SCC4 eCATT restriction
-        global ECATT_FLAG
+        global ECATT_FLAG, GATEWAY_ACTIVE
         if self.path.startswith("/ecatt-flag/"):
             ECATT_FLAG = self.path.rsplit("/", 1)[-1].replace("blank", " ")
             self._send("<ok/>")
             return
+        # test control: simulate a system with / without an active Gateway
+        if self.path.startswith("/gateway/"):
+            GATEWAY_ACTIVE = self.path.rsplit("/", 1)[-1] == "on"
+            self._send("<ok/>")
+            return
+        # D-047: SAP's OData catalog service.
+        if "CATALOGSERVICE" in self.path.upper():
+            if not GATEWAY_ACTIVE:
+                self._send("<html>Not Found</html>", 404)
+                return
+            self._send_json(CATALOG_JSON)
+            return
         self._send("<html/>")
+
+    def _send_json(self, body: str) -> None:
+        raw = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
 
     def do_POST(self) -> None:
         # /inactive simulates the SICF service being switched off.
@@ -293,6 +327,19 @@ class H(BaseHTTPRequestHandler):
             self._send(_read_table_xml(
                 [("MANDT", 3), ("MTEXT", 25), ("CCCATEGORY", 1), ("CATTKENNZ", 1)],
                 [["100", "Home S/4", "C", ECATT_FLAG]]))
+            return
+        # D-047: remote-enabled function module catalogue.
+        if "RFC_READ_TABLE" in body and "TFDIR" in body:
+            rows = [["Z_CREATE_ORDER", "R"], ["Z_CHECK_STOCK", "R"]] if "Z%" in body \
+                else [["BAPI_SALESORDER_CREATEFROMDAT2", "R"], ["RFC_READ_TABLE", "R"],
+                      ["Z_CREATE_ORDER", "R"]]
+            self._send(_read_table_xml([("FUNCNAME", 30), ("FMODE", 1)], rows))
+            return
+        if "RFC_READ_TABLE" in body and "TFTIT" in body:
+            self._send(_read_table_xml(
+                [("SPRAS", 1), ("FUNCNAME", 30), ("STEXT", 40)],
+                [["E", "Z_CREATE_ORDER", "Create a sales order"],
+                 ["E", "Z_CHECK_STOCK", "Check stock availability"]]))
             return
         if "RFC_READ_TABLE" in body and "TADIR" in body:
             kind = "ECTC" if "ECTC" in body else "ECSC"
