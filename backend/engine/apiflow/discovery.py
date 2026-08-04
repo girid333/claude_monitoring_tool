@@ -176,10 +176,26 @@ def discover_rfc_functions(client: RfcSoapClient, pattern: str = "",
         "description": titles.get(n, ""),
         "custom": n.startswith(("Z", "Y")),
     } for n in names]
-    note = (f"{len(functions)} remote-enabled function module(s)"
-            + (" matching your search." if (pattern or custom_only) else " (showing first "
-               f"{limit}; use a search term to narrow).")) if functions else \
-           "No remote-enabled function modules matched."
+    if functions:
+        note = (f"{len(functions)} remote-enabled function module(s)"
+                + (" matching your search." if (pattern or custom_only)
+                   else f" (showing first {limit}; use a search term to narrow)."))
+    elif custom_only:
+        # Distinguish "you have no custom RFC modules" from "the query is
+        # broken" — an empty result alone can't tell you which, and guessing
+        # is what caused the D-045 silent-empty problems.
+        note = ("No CUSTOM (Z*/Y*) remote-enabled function modules found. That is "
+                "normal on a mostly-standard system. Re-run with custom_only=false "
+                "to confirm the search itself works and to see standard modules; if "
+                "that is also empty, the user likely lacks S_TABU_* authorization "
+                "for TFDIR.")
+    elif pattern:
+        note = (f"No remote-enabled function modules matched {pattern!r}. Try a "
+                "shorter fragment — the search already wraps it in wildcards.")
+    else:
+        note = ("No remote-enabled function modules returned at all. Since every ABAP "
+                "system has many, this most likely means the user lacks S_TABU_* "
+                "authorization to read TFDIR rather than that none exist.")
     return True, functions, note
 
 

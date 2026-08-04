@@ -185,6 +185,35 @@ def discover_capabilities(req: DiscoverRequest) -> dict:
     return {"sid": req.sid, **cat.as_dict()}
 
 
+class ODataMetadataRequest(BaseModel):
+    sid: str
+    service: str            # absolute URL or path, as returned by /discover
+
+
+@router.post("/odata/metadata")
+def odata_metadata(req: ODataMetadataRequest) -> dict:
+    """Turn one OData service into a list of concrete callable operations."""
+    from ..apiflow.odata import fetch_metadata
+    return fetch_metadata(_client_for(req.sid), req.service).as_dict()
+
+
+class ODataReadRequest(BaseModel):
+    sid: str
+    service: str
+    entity_set: str
+    top: int = 20
+    filter: str = ""
+    select: str = ""
+
+
+@router.post("/odata/read")
+def odata_read(req: ODataReadRequest) -> dict:
+    """Read-only execution of one entity set (the flow-step primitive)."""
+    from ..apiflow.odata import read_entity_set
+    return read_entity_set(_client_for(req.sid), req.service, req.entity_set,
+                            req.top, req.filter, req.select)
+
+
 @router.post("/run")
 def run_checks(req: RunRfcRequest) -> dict:
     client = _client_for(req.sid)

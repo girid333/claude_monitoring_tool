@@ -228,6 +228,52 @@ ECATT_FLAG = "X"
 # tool must say so plainly rather than appear broken.
 GATEWAY_ACTIVE = True
 
+# D-047b: realistic SAP EDMX — namespaced, with sap: annotations, a keyed
+# entity type, and a function import carrying an HTTP method. Anything that
+# only parses namespace-free XML will fail against this, exactly as it would
+# against the real thing.
+SERVICE_METADATA = """<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="1.0" xmlns:edmx="http://schemas.microsoft.com/ado/2007/06/edmx"
+           xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata"
+           xmlns:sap="http://www.sap.com/Protocols/SAPData">
+<edmx:DataServices m:DataServiceVersion="2.0">
+<Schema Namespace="ALERTINBOX" xmlns="http://schemas.microsoft.com/ado/2008/09/edm">
+  <EntityType Name="Alert">
+    <Key><PropertyRef Name="AlertGuid"/></Key>
+    <Property Name="AlertGuid" Type="Edm.String" Nullable="false" MaxLength="32"/>
+    <Property Name="Severity" Type="Edm.Int32" Nullable="true"/>
+    <Property Name="Description" Type="Edm.String" Nullable="true" MaxLength="255"/>
+    <Property Name="Status" Type="Edm.String" Nullable="true" MaxLength="10"/>
+  </EntityType>
+  <EntityType Name="Forbidden">
+    <Key><PropertyRef Name="Id"/></Key>
+    <Property Name="Id" Type="Edm.String" Nullable="false"/>
+  </EntityType>
+  <EntityContainer Name="ALERTINBOX_Entities" m:IsDefaultEntityContainer="true">
+    <EntitySet Name="AlertSet" EntityType="ALERTINBOX.Alert"
+               sap:creatable="false" sap:updatable="true" sap:deletable="false"/>
+    <EntitySet Name="ForbiddenSet" EntityType="ALERTINBOX.Forbidden"/>
+    <FunctionImport Name="ConfirmAlert" ReturnType="ALERTINBOX.Alert"
+                    m:HttpMethod="POST">
+      <Parameter Name="AlertGuid" Type="Edm.String" Mode="In" Nullable="false"/>
+      <Parameter Name="Comment" Type="Edm.String" Mode="In" Nullable="true"/>
+    </FunctionImport>
+  </EntityContainer>
+</Schema>
+</edmx:DataServices>
+</edmx:Edmx>"""
+
+ALERT_ROWS = """{"d":{"results":[
+{"__metadata":{"uri":"x"},"AlertGuid":"AAA1","Severity":3,
+ "Description":"Job SRSM_AMA_SELFMON_HEARTBEAT cancelled","Status":"NEW",
+ "Nested":{"deep":"ignored"}},
+{"__metadata":{"uri":"y"},"AlertGuid":"BBB2","Severity":1,
+ "Description":"Work process in PRIV mode","Status":"ACK"}
+]}}"""
+
+ODATA_ERROR = """{"error":{"code":"SY/530",
+ "message":{"lang":"en","value":"Not authorized for entity set ForbiddenSet"}}}"""
+
 CATALOG_JSON = """{"d":{"results":[
 {"ID":"ZSD_SALESORDER_SRV_0001","Title":"Sales Order Management",
  "TechnicalServiceName":"ZSD_SALESORDER_SRV","TechnicalServiceVersion":1,
@@ -282,6 +328,16 @@ class H(BaseHTTPRequestHandler):
             GATEWAY_ACTIVE = self.path.rsplit("/", 1)[-1] == "on"
             self._send("<ok/>")
             return
+        # D-047b: $metadata for a service, and entity-set reads.
+        if self.path.endswith("$metadata") or "$metadata" in self.path:
+            self._send_xml(SERVICE_METADATA)
+            return
+        if "/AlertSet" in self.path:
+            self._send_json(ALERT_ROWS)
+            return
+        if "/ForbiddenSet" in self.path:
+            self._send_json(ODATA_ERROR, 403)
+            return
         # D-047: SAP's OData catalog service.
         if "CATALOGSERVICE" in self.path.upper():
             if not GATEWAY_ACTIVE:
@@ -291,10 +347,18 @@ class H(BaseHTTPRequestHandler):
             return
         self._send("<html/>")
 
-    def _send_json(self, body: str) -> None:
+    def _send_json(self, body: str, status: int = 200) -> None:
+        raw = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_xml(self, body: str) -> None:
         raw = body.encode()
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/xml")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
