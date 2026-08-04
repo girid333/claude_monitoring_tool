@@ -87,20 +87,28 @@ class DataRunResult:
 
 # ── binding helpers ──────────────────────────────────────────────────────
 
-def suggest_bindings(steps: list[dict]) -> list[Binding]:
+def suggest_bindings(steps: list[dict], include_toggles: bool = False) -> list[Binding]:
     """Propose one dataset column per editable recorded field.
 
     Column names are derived from the field's own label so the resulting
     spreadsheet reads like the transaction ("Vendor", "Material") rather
     than "step_7" — the person filling it in is a functional user who has
-    never seen the flow JSON."""
+    never seen the flow JSON.
+
+    `include_toggles` exists because the default is a JUDGEMENT, not a
+    rule: checkboxes and radios are usually part of the navigation path
+    (so varying them per row would change the scenario rather than the
+    data), but for some transactions a flag genuinely IS the varying
+    data — "delivery complete", "final invoice", a posting-block
+    indicator. This is a suggestion the caller can override, not a
+    restriction."""
     used: set[str] = set()
     out: list[Binding] = []
     for s in steps:
         if s.get("act") != "set":
             continue
-        if isinstance(s.get("value"), bool):
-            continue   # checkboxes/radios are usually part of the path, not data
+        if isinstance(s.get("value"), bool) and not include_toggles:
+            continue
         label = (s.get("target") or "").strip()
         column = _column_name(label, s.get("index", 0), used)
         used.add(column)
@@ -146,31 +154,82 @@ def overrides_for_row(bindings: list[Binding], row: dict[str, Any]) -> tuple[dic
 
 # ── outcome capture ──────────────────────────────────────────────────────
 
-# SAP's confirmation messages, in the forms that carry a document number.
+# Verbs SAP uses when something was successfully committed. Deliberately
+# broad — every module phrases this differently, and a data run is
+# meaningless to an auditor if the confirmation isn't captured.
+_SUCCESS_VERB = (r"(?:created|saved|posted|changed|generated|issued|released|"
+                 r"scheduled|updated|added|completed|blocked|deleted|reversed)")
+
+# An SAP object key is NOT always numeric. Materials, customers with alpha
+# prefixes, batch numbers, equipment, and anything from a custom Z
+# transaction can be alphanumeric — a digits-only pattern silently found
+# nothing for most transactions, which was the PO-shaped assumption.
+_KEY = r"[A-Za-z0-9][A-Za-z0-9_\-/]{2,29}"
+
 _OUTCOME_PATTERNS = [
-    re.compile(r"\b(?:created|saved|posted|changed)\b[^.\n]*?\b(\d{6,12})\b", re.I),
-    re.compile(r"\b(\d{6,12})\b[^.\n]*?\b(?:created|saved|posted)\b", re.I),
+    # "Standard PO created under the number 4500001234"
+    re.compile(rf"\b{_SUCCESS_VERB}\b[^.\n]{{0,60}}?\b(?:number|no\.?|#)\s*({_KEY})", re.I),
+    # "Material RAW-001 created" / "Customer 0000012345 created"
+    re.compile(rf"\b({_KEY})\b[^.\n]{{0,40}}?\b{_SUCCESS_VERB}\b", re.I),
+    # "Standard Order 12345 has been saved" / "Document 1900004567 was posted"
+    re.compile(rf"\b{_SUCCESS_VERB}\b[^.\n]{{0,60}}?\b({_KEY})\b", re.I),
 ]
 
 
-def extract_outcome(text: str) -> str:
-    """Pull the created document number out of a status message.
+def extract_outcome(text: str, pattern: Optional[str] = None) -> str:
+    """Summarise what the transaction confirmed, for the summary table.
 
-    The auditor's document is far more useful with 'PO 4500001234 created'
-    per row than with a screenshot alone, so this is best-effort on top of
-    the screenshot rather than a replacement for it."""
+    The auditor's document is far more useful with "PO 4500001234 created"
+    per row than with a screenshot alone — but this is best-effort ON TOP
+    of the screenshot, never a replacement, precisely because message
+    wording varies by module, release and language.
+
+    `pattern` lets a flow override the default entirely: a custom Z
+    transaction, a non-English system, or an unusual message format can
+    supply its own regex (first capturing group wins, else the whole
+    match). That escape hatch matters more than making the default
+    cleverer — no default can cover every transaction."""
     if not text:
         return ""
     flat = " ".join(text.split())
-    for pattern in _OUTCOME_PATTERNS:
-        m = pattern.search(flat)
+
+    if pattern:
+        try:
+            m = re.search(pattern, flat, re.I)
+        except re.error:
+            return ""      # a bad user regex must not break the run
+        if not m:
+            return ""
+        return (m.group(1) if m.groups() else m.group(0)).strip()[:200]
+
+    for rx in _OUTCOME_PATTERNS:
+        m = rx.search(flat)
         if m:
             start = max(0, m.start() - 40)
             return flat[start:m.end() + 40].strip()
-    for line in flat.split(". "):
-        if re.search(r"\b(created|saved|posted)\b", line, re.I):
-            return line.strip()[:160]
+
+    # Nothing matched a key, but a success verb alone is still worth
+    # recording — "Data saved" carries no number and is a valid outcome.
+    for sentence in re.split(r"(?<=[.!])\s+", flat):
+        if re.search(rf"\b{_SUCCESS_VERB}\b", sentence, re.I):
+            return sentence.strip()[:160]
     return ""
+
+
+def looks_like_error(text: str) -> bool:
+    """Whether a status message reads as a failure.
+
+    Kept separate from step-level success because SAP frequently returns
+    HTTP/step success while the SCREEN reports a business error — an
+    auditor's document that marked those green would be actively
+    misleading."""
+    if not text:
+        return False
+    flat = " ".join(text.split())
+    return bool(re.search(
+        r"\b(?:error|cannot|could not|not possible|is blocked|no authorization|"
+        r"does not exist|not permitted|invalid|missing|failed|is locked|"
+        r"please enter|must be|not allowed|incorrect)\b", flat, re.I))
 
 
 # ── template generation ──────────────────────────────────────────────────

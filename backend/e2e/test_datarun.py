@@ -112,18 +112,55 @@ check("14. Missing columns reported rather than assumed",
       missing_col == {"1": "900000"} and any("missing" in n for n in notes_mc), notes_mc)
 
 # ---- 15-17: capturing the SAP outcome for the summary table ----
-check("15. Document number extracted from a creation message",
-      "4500001234" in datarun.extract_outcome(
-          "Standard PO created under the number 4500001234"),
-      datarun.extract_outcome("Standard PO created under the number 4500001234"))
-check("16. Alternative phrasing also captured",
-      "1900004567" in datarun.extract_outcome("Document 1900004567 was posted"),
-      datarun.extract_outcome("Document 1900004567 was posted"))
-check("17. No false positive on an unrelated message",
+# Real confirmation formats from a spread of modules — the point being
+# that this must work for ANY functional T-code, not just PO-shaped ones.
+messages = [
+    ("ME21N", "Standard PO created under the number 4500001234", "4500001234"),
+    ("VA01", "Standard Order 12345 has been saved", "12345"),
+    ("FB01", "Document 1900004567 was posted in company code 1000", "1900004567"),
+    ("MM01", "Material RAW-001 created", "RAW-001"),          # ALPHANUMERIC
+    ("XD01", "Customer 0000012345 created", "0000012345"),
+    ("MIGO", "Material document 5000001234 posted", "5000001234"),
+    ("IE01", "Equipment EQ-100-A created", "EQ-100-A"),        # letters + dashes
+    ("CS01", "BOM 00012345 was created", "00012345"),
+    ("Z_CUST", "Z-Object ABC/2026/0042 generated successfully", "ABC/2026/0042"),
+]
+missed = [(t, m) for t, m, key in messages if key not in datarun.extract_outcome(m)]
+check("15. Confirmation captured across many transaction types, incl. "
+      "ALPHANUMERIC keys", not missed, missed)
+check("16. A success message with no document key is still recorded",
+      "saved" in datarun.extract_outcome("Data was saved").lower(),
+      datarun.extract_outcome("Data was saved"))
+check("17. No false positive on an error message",
       datarun.extract_outcome("Please enter a vendor") == "",
       datarun.extract_outcome("Please enter a vendor"))
+check("18. A flow can override the pattern entirely (custom Z / non-English)",
+      datarun.extract_outcome("Beleg 4711 wurde gebucht",
+                               pattern=r"Beleg (\d+) wurde gebucht") == "4711",
+      datarun.extract_outcome("Beleg 4711 wurde gebucht",
+                               pattern=r"Beleg (\d+) wurde gebucht"))
+check("19. A malformed custom pattern fails safe, never breaks the run",
+      datarun.extract_outcome("anything", pattern="([unclosed") == "")
 
-# ---- 18-24: the auditor/tester evidence document ----
+# Business errors on a technically-successful screen must not read as PASS.
+errs = ["Vendor 200000 is blocked for purchasing",
+        "No authorization for company code 1000",
+        "Material RAW-999 does not exist",
+        "Please enter a delivery date"]
+check("20. Business-error messages recognised as failures",
+      all(datarun.looks_like_error(e) for e in errs),
+      [e for e in errs if not datarun.looks_like_error(e)])
+check("21. ...and a success message is not mistaken for one",
+      not datarun.looks_like_error("Standard PO created under the number 4500001234"))
+
+# Toggles are excluded by DEFAULT but bindable when a flag is the data.
+with_toggles = datarun.suggest_bindings(recorded_steps, include_toggles=True)
+check("22. Checkbox can be bound when a flag IS the varying data",
+      any(b.step_index == 6 for b in with_toggles)
+      and len(with_toggles) == len(bindings) + 1,
+      [b.column for b in with_toggles])
+
+# ---- 23-33: the auditor/tester evidence document ----
 from PIL import Image as PILImage  # noqa: E402
 shots = []
 for i in range(1, 4):
@@ -151,35 +188,35 @@ gen = DataRunReportGenerator(result, [b.as_dict() for b in bindings], sid="F4H",
                               description="Purchase order creation — vendor variations",
                               executed_by="GIRID")
 docx_path = gen.generate_word()
-check("18. Word evidence document generated", Path(docx_path).exists()
+check("23. Word evidence document generated", Path(docx_path).exists()
       and Path(docx_path).stat().st_size > 20000, docx_path)
 
 from docx import Document  # noqa: E402
 d = Document(docx_path)
 text = "\n".join(p.text for p in d.paragraphs)
 tables_text = "\n".join(c.text for t in d.tables for r in t.rows for c in r.cells)
-check("19. Header states system, executor and pass/fail counts",
+check("24. Header states system, executor and pass/fail counts",
       "F4H" in text and "GIRID" in text and "Passed: 2" in text and "Failed: 1" in text,
       text[:400])
-check("20. Overall verdict reflects the failure",
+check("25. Overall verdict reflects the failure",
       "FAILURES PRESENT" in text, text[:400])
-check("21. Document states WHICH fields were data-driven",
+check("26. Document states WHICH fields were data-driven",
       "Vendor" in tables_text and "Purchasing_Org" in tables_text)
-check("22. Summary table carries per-row status and the created document number",
+check("27. Summary table carries per-row status and the created document number",
       "PASS" in tables_text and "FAIL" in tables_text
       and "4500001234" in tables_text, tables_text[:300])
-check("23. Each iteration's own inputs appear with it",
+check("28. Each iteration's own inputs appear with it",
       "200000" in tables_text and "300000" in tables_text)
-check("24. The failure reason is recorded verbatim for the tester",
+check("29. The failure reason is recorded verbatim for the tester",
       "blocked for purchasing" in text, text[-500:])
-check("25. Screenshots embedded, one set per iteration",
+check("30. Screenshots embedded, one set per iteration",
       len(d.inline_shapes) == 3, len(d.inline_shapes))
 
 pdf_path = gen.generate_pdf()
 pdf_bytes = Path(pdf_path).read_bytes() if Path(pdf_path).exists() else b""
 # Size is a poor proxy here: flat-colour test PNGs compress to almost
 # nothing. Assert on embedded image XObjects and page count instead.
-check("26. PDF evidence document generated with the screenshots embedded",
+check("31. PDF evidence document generated with the screenshots embedded",
       b"/Image" in pdf_bytes and pdf_bytes.count(b"/Type /Page") >= 3,
       f"{len(pdf_bytes)} bytes, images={b'/Image' in pdf_bytes}")
 
@@ -190,7 +227,7 @@ result2 = {**result, "iterations": [{**result["iterations"][0],
                                       "screenshots": [str(bad)]}]}
 gen2 = DataRunReportGenerator(result2, [b.as_dict() for b in bindings], sid="F4H",
                                output_dir=str(Path(work) / "reports"))
-check("27. A corrupt screenshot does not abort the PDF",
+check("32. A corrupt screenshot does not abort the PDF",
       Path(gen2.generate_pdf()).exists())
 
 # an empty run still produces a legible document rather than crashing
@@ -199,7 +236,7 @@ empty = {"flow_id": "po_create", "sid": "F4H", "total": 0, "passed": 0,
 gen3 = DataRunReportGenerator(empty, [b.as_dict() for b in bindings], sid="F4H",
                                output_dir=str(Path(work) / "reports"))
 p3 = gen3.generate_word()
-check("28. A run with no data rows still yields a readable document",
+check("33. A run with no data rows still yields a readable document",
       Path(p3).exists() and "NO DATA" in "\n".join(
           x.text for x in Document(p3).paragraphs))
 
