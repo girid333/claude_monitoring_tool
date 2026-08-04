@@ -37,17 +37,22 @@ def check(n, c, d=""):
     print(("PASS " if c else "FAIL ") + n + ("" if c else f"  << {d}"))
 
 
-# A recorded PO-creation flow, in the shape describe_steps() produces.
+# A recorded PO-creation flow in the EXACT shape describe_steps() returns —
+# note there is NO "index" key; steps are positional. An earlier version of
+# this fixture invented index keys, which hid a real bug: suggest_bindings
+# defaulted every step_index to 0, so all overrides collapsed onto step 0
+# and no field was actually varied. The fixture must not be more generous
+# than the real function.
 recorded_steps = [
-    {"index": 0, "act": "start_tcode", "target": "Command field", "value": "ME21N"},
-    {"index": 1, "act": "set", "target": "Vendor", "value": "100000"},
-    {"index": 2, "act": "set", "target": "Purchasing Org", "value": "1000"},
-    {"index": 3, "act": "set", "target": "Material", "value": "RAW-001"},
-    {"index": 4, "act": "set", "target": "Quantity", "value": "10"},
-    {"index": 5, "act": "set", "target": "Delivery Date", "value": "01.09.2026"},
-    {"index": 6, "act": "set", "target": "Confirm", "value": True},   # checkbox
-    {"index": 7, "act": "press", "target": "Save", "value": None},
-    {"index": 8, "act": "capture", "target": "—", "value": None},
+    {"act": "start_tcode", "target": "Command field", "value": "ME21N"},
+    {"act": "set", "target": "Vendor", "value": "100000"},
+    {"act": "set", "target": "Purchasing Org", "value": "1000"},
+    {"act": "set", "target": "Material", "value": "RAW-001"},
+    {"act": "set", "target": "Quantity", "value": "10"},
+    {"act": "set", "target": "Delivery Date", "value": "01.09.2026"},
+    {"act": "set", "target": "Confirm", "value": True},   # checkbox
+    {"act": "press", "target": "Save", "value": None},
+    {"act": "capture", "target": "—", "value": None},
 ]
 
 # ---- 1-4: binding suggestion ----
@@ -64,10 +69,15 @@ check("4. Recorded sample values retained for the template",
       and bindings[4].recorded_value == "01.09.2026",
       [b.recorded_value for b in bindings])
 
+check("4b. Each binding carries its OWN step index (positional), so every "
+      "field is varied rather than all collapsing onto step 0",
+      [b.step_index for b in bindings] == [1, 2, 3, 4, 5],
+      [(b.step_index, b.column) for b in bindings])
+
 dupes = datarun.suggest_bindings([
-    {"index": 1, "act": "set", "target": "Date", "value": "a"},
-    {"index": 2, "act": "set", "target": "Date", "value": "b"},
-    {"index": 3, "act": "set", "target": "", "value": "c"},
+    {"act": "set", "target": "Date", "value": "a"},
+    {"act": "set", "target": "Date", "value": "b"},
+    {"act": "set", "target": "", "value": "c"},
 ])
 check("5. Duplicate and blank labels still yield unique usable columns",
       len({d.column for d in dupes}) == 3 and "" not in {d.column for d in dupes},

@@ -269,32 +269,11 @@ class RunRequest(BaseModel):
     flow_overrides: dict[str, dict[str, Any]] = {}
 
 
-def _apply_overrides(flow, overrides: dict[str, Any]) -> list[str]:
-    """D-043: apply {step_index: value} onto a loaded Flow's SET steps.
-    Returns human-readable notes for anything skipped (bad index / not a
-    SET step) so the run log shows WHY an override didn't take, rather
-    than it just silently not applying."""
-    from engine.schema import Act
-    notes = []
-    for key, value in (overrides or {}).items():
-        try:
-            idx = int(key)
-        except (TypeError, ValueError):
-            notes.append(f"override ignored: {key!r} is not a step index")
-            continue
-        if not (0 <= idx < len(flow.steps)):
-            notes.append(f"override ignored: no step {idx}")
-            continue
-        step = flow.steps[idx]
-        if step.act != Act.SET:
-            notes.append(f"override ignored: step {idx} is {step.act.value}, not set")
-            continue
-        # Preserve the recorded value's TYPE where it matters: a checkbox
-        # step's value is a bool, and the UI sends strings.
-        if isinstance(step.value, bool) and isinstance(value, str):
-            value = value.strip().lower() in ("true", "check", "checked", "select", "1", "yes", "x")
-        step.value = value
-    return notes
+# D-049: the implementation moved to engine/datarun.py so the data-run
+# executor can use it without `engine` importing from `main` (which would
+# invert the dependency direction). Re-exported under the original name so
+# every existing caller and test is unaffected.
+from engine.datarun import apply_overrides as _apply_overrides  # noqa: E402
 
 
 class RecorderStartRequest(BaseModel):

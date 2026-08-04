@@ -104,16 +104,23 @@ def suggest_bindings(steps: list[dict], include_toggles: bool = False) -> list[B
     restriction."""
     used: set[str] = set()
     out: list[Binding] = []
-    for s in steps:
+    for position, s in enumerate(steps):
+        # describe_steps() does NOT emit an "index" key — it returns steps in
+        # order — so the POSITION is the step index. Defaulting to 0 here
+        # gave every binding step_index=0, so all overrides collapsed onto
+        # step 0 (last one winning) and the intended fields were never
+        # changed. It looked fine in unit tests only because the fixture had
+        # index keys the real function doesn't produce.
+        idx = int(s.get("index", position))
         if s.get("act") != "set":
             continue
         if isinstance(s.get("value"), bool) and not include_toggles:
             continue
         label = (s.get("target") or "").strip()
-        column = _column_name(label, s.get("index", 0), used)
+        column = _column_name(label, idx, used)
         used.add(column)
-        out.append(Binding(step_index=int(s.get("index", 0)), column=column,
-                            label=label or f"step {s.get('index')}",
+        out.append(Binding(step_index=idx, column=column,
+                            label=label or f"step {idx}",
                             recorded_value=s.get("value")))
     return out
 
@@ -129,6 +136,41 @@ def _column_name(label: str, index: int, used: set[str]) -> str:
         name = f"{base[:36]}_{n}"
         n += 1
     return name
+
+
+def apply_overrides(flow, overrides: dict[str, Any]) -> list[str]:
+    """Apply {step_index: value} onto a loaded Flow's SET steps (D-043).
+
+    Lives here rather than in main.py because the data-run executor needs
+    it too, and `engine` importing from `main` would invert the dependency
+    direction. main.py re-exports it as `_apply_overrides` so existing
+    callers and tests are unaffected.
+
+    Returns human-readable notes for anything skipped, so the run log
+    shows WHY an override didn't take rather than it silently not applying.
+    """
+    from .schema import Act
+    notes = []
+    for key, value in (overrides or {}).items():
+        try:
+            idx = int(key)
+        except (TypeError, ValueError):
+            notes.append(f"override ignored: {key!r} is not a step index")
+            continue
+        if not (0 <= idx < len(flow.steps)):
+            notes.append(f"override ignored: no step {idx}")
+            continue
+        step = flow.steps[idx]
+        if step.act != Act.SET:
+            notes.append(f"override ignored: step {idx} is {step.act.value}, not set")
+            continue
+        # Preserve the recorded value's TYPE where it matters: a checkbox
+        # step's value is a bool, and the UI/spreadsheet send strings.
+        if isinstance(step.value, bool) and isinstance(value, str):
+            value = value.strip().lower() in ("true", "check", "checked",
+                                               "select", "1", "yes", "x")
+        step.value = value
+    return notes
 
 
 def overrides_for_row(bindings: list[Binding], row: dict[str, Any]) -> tuple[dict, list[str]]:
@@ -157,8 +199,12 @@ def overrides_for_row(bindings: list[Binding], row: dict[str, Any]) -> tuple[dic
 # Verbs SAP uses when something was successfully committed. Deliberately
 # broad — every module phrases this differently, and a data run is
 # meaningless to an auditor if the confirmation isn't captured.
+# NOTE: "blocked" was originally in this list and was a genuine bug — it is
+# a FAILURE word ("Vendor 200000 is blocked for purchasing"), and including
+# it made a blocked-vendor error extract as a successful outcome, which in
+# turn marked the row PASS in an auditor's document.
 _SUCCESS_VERB = (r"(?:created|saved|posted|changed|generated|issued|released|"
-                 r"scheduled|updated|added|completed|blocked|deleted|reversed)")
+                 r"scheduled|updated|added|completed|deleted|reversed)")
 
 # An SAP object key is NOT always numeric. Materials, customers with alpha
 # prefixes, batch numbers, equipment, and anything from a custom Z
@@ -214,6 +260,26 @@ def extract_outcome(text: str, pattern: Optional[str] = None) -> str:
         if re.search(rf"\b{_SUCCESS_VERB}\b", sentence, re.I):
             return sentence.strip()[:160]
     return ""
+
+
+_ERROR_WORDS = (r"(?:error|cannot|could not|not possible|is blocked|no authorization|"
+                r"does not exist|not permitted|invalid|missing|failed|is locked|"
+                r"please enter|must be|not allowed|incorrect|terminated)")
+
+
+def extract_error(text: str) -> str:
+    """The specific sentence that reads as a failure.
+
+    An auditor's document needs the actual SAP message ("Vendor 200000 is
+    blocked for purchasing"), not the whole screen dumped into a cell."""
+    if not text:
+        return ""
+    flat = " ".join(text.split())
+    for sentence in re.split(r"(?<=[.!])\s+|(?<=\.)\s+", flat):
+        if re.search(_ERROR_WORDS, sentence, re.I):
+            return sentence.strip()[:200]
+    m = re.search(rf"[^.]{{0,90}}{_ERROR_WORDS}[^.]{{0,90}}", flat, re.I)
+    return m.group(0).strip()[:200] if m else ""
 
 
 def looks_like_error(text: str) -> bool:
