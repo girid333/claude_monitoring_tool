@@ -187,6 +187,19 @@ try:
           not schema.safe_flow_id("../etc") and not schema.safe_flow_id(".hidden"))
     check("27. Delete removes it", schema.delete_flow("alert_triage")
           and schema.list_flows() == [])
+
+    # ---- 28-29: a wrong entity set must say what the RIGHT ones are ----
+    typo = schema.ApiFlow.from_dict({
+        "flow_id": "typo",
+        "steps": [{"id": "s", "kind": "odata_read", "service": SVC,
+                    "entity_set": "AlertSets"}],      # trailing s
+    })
+    tres = runner.run_flow(client, typo)
+    err = tres.steps[0].error
+    check("28. Unknown entity set lists the real ones from $metadata",
+          not tres.ok and "AlertSet" in err and "Entity sets available" in err, err)
+    check("29. ...and points at the closest match for an obvious typo",
+          "Did you mean 'AlertSet'" in err, err)
 finally:
     srv.terminate()
 

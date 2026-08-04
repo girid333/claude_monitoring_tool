@@ -139,6 +139,30 @@ def substitute(value: Any, context: dict[str, dict[str, Any]],
     return value
 
 
+def _suggest_entity_sets(client: RfcSoapClient, service: str, attempted: str) -> str:
+    """Turn 'Resource not found' into 'here are the names that exist'.
+
+    Closest-match first so a typo or a plural/singular slip is obvious at a
+    glance."""
+    try:
+        from .odata import fetch_metadata
+        md = fetch_metadata(client, service)
+        if not md.ok:
+            return ""
+        names = [o.name for o in md.operations if o.kind == "entityset"]
+        if not names:
+            return " This service exposes no entity sets."
+        import difflib
+        close = difflib.get_close_matches(attempted, names, n=3, cutoff=0.4)
+        ordered = close + [n for n in names if n not in close]
+        shown = ", ".join(ordered[:15])
+        more = f" (+{len(ordered) - 15} more)" if len(ordered) > 15 else ""
+        hint = f" Did you mean {close[0]!r}?" if close else ""
+        return f"{hint} Entity sets available in this service: {shown}{more}."
+    except Exception:  # noqa: BLE001 - a suggestion must never mask the real error
+        return ""
+
+
 # ── step execution ───────────────────────────────────────────────────────
 
 def _run_step(client: RfcSoapClient, step: FlowStep,
@@ -166,6 +190,14 @@ def _run_step(client: RfcSoapClient, step: FlowStep,
                 select=step.select)
             if not out.get("ok"):
                 res.error = out.get("error", "read failed")
+                # A wrong entity set name is the single easiest mistake to
+                # make, and SAP's "Resource not found for URI segment" says
+                # nothing about what WOULD have worked. Since the service's
+                # metadata lists the valid names, fetch it and say so.
+                if "not found" in res.error.lower():
+                    res.error += _suggest_entity_sets(
+                        client, str(substitute(step.service, context)),
+                        str(substitute(step.entity_set, context)))
                 res.duration_ms = int((time.time() - started) * 1000)
                 return res
             res.rows = out.get("rows", [])

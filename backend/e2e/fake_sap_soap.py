@@ -348,11 +348,25 @@ class H(BaseHTTPRequestHandler):
                 return
             self._send_xml(SERVICE_METADATA)
             return
-        if "/AlertSet" in self.path:
+        # Match the entity-set segment EXACTLY: "/AlertSets" must NOT be
+        # treated as "/AlertSet", otherwise the test for "unknown entity set"
+        # silently passes against the wrong behaviour.
+        segment = self.path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+        if segment == "AlertSet":
             self._send_json(ALERT_ROWS)
             return
-        if "/ForbiddenSet" in self.path:
+        if segment == "ForbiddenSet":
             self._send_json(ODATA_ERROR, 403)
+            return
+        if segment == "ConfirmAlert":
+            self._send_json(ALERT_ROWS)
+            return
+        # An entity set that doesn't exist — SAP's message names nothing useful.
+        if "/sap/opu/odata/" in self.path and "$metadata" not in self.path \
+                and "CATALOGSERVICE" not in self.path.upper():
+            self._send_json(
+                '{"error":{"message":{"value":"Resource not found for URI segment"}}}',
+                404)
             return
         # D-047: SAP's OData catalog service.
         if "CATALOGSERVICE" in self.path.upper():
