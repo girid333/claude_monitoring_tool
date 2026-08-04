@@ -74,6 +74,19 @@ check("4b. Each binding carries its OWN step index (positional), so every "
       [b.step_index for b in bindings] == [1, 2, 3, 4, 5],
       [(b.step_index, b.column) for b in bindings])
 
+# Display/report transactions confirm differently from creation ones —
+# SE16 says "2 Entries displayed", not "... created". Missing these meant
+# the summary table had an empty Result column for a whole class of T-code.
+check("4c. Display-transaction confirmations are captured too",
+      "2 Entries displayed" in datarun.extract_outcome(
+          "2 Entries displayed for table T000"),
+      datarun.extract_outcome("2 Entries displayed for table T000"))
+check("4d. Error detection shares ONE word list with error extraction "
+      "(two copies had already drifted apart)",
+      datarun.looks_like_error("Table ZBOGUS does not exist")
+      and bool(datarun.extract_error("Table ZBOGUS does not exist"))
+      and not datarun.looks_like_error("2 Entries displayed for table T000"))
+
 dupes = datarun.suggest_bindings([
     {"act": "set", "target": "Date", "value": "a"},
     {"act": "set", "target": "Date", "value": "b"},

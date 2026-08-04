@@ -18,6 +18,15 @@ type FlowInfo = {
   tcodes: string[]; has_capture: boolean;
 };
 type FlowStep = { act: string; target: string; value: unknown; resolved_by: string };
+// D-049: one recorded field wired to a spreadsheet column.
+type DataBinding = {
+  step_index: number; column: string; label: string; recorded_value: unknown;
+};
+type DataProgress = {
+  type: string; index?: number; total?: number; ok?: boolean;
+  outcome?: string; error?: string; message?: string;
+  inputs?: Record<string, unknown>;
+};
 type FlowDetail = {
   flow_id: string; description: string; step_count: number; steps: FlowStep[];
 };
@@ -55,6 +64,16 @@ export default function Landscape() {
   const [viewingFlow, setViewingFlow] = useState<string | null>(null);
   const [flowDetail, setFlowDetail] = useState<FlowDetail | null>(null);
   const [flowDetailError, setFlowDetailError] = useState("");
+
+  // D-049: data-driven run — record once, replay per spreadsheet row.
+  const [dataRunFlow, setDataRunFlow] = useState<string | null>(null);
+  const [dataBindings, setDataBindings] = useState<DataBinding[]>([]);
+  const [dataFile, setDataFile] = useState<File | null>(null);
+  const [dataRunId, setDataRunId] = useState<string | null>(null);
+  const [dataProgress, setDataProgress] = useState<DataProgress[]>([]);
+  const [dataBusy, setDataBusy] = useState(false);
+  const [dataError, setDataError] = useState("");
+  const [dataDone, setDataDone] = useState(false);
   // D-043: replay-time input edits — {flowId: {stepIndex: newValue}}.
   // Edited in the step viewer, sent with Execute, applied in memory only
   // (the saved recording is never modified).
@@ -90,6 +109,72 @@ export default function Landscape() {
       setLoadError(`Could not delete ${flowId}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setConfirmDelete(null);
+    }
+  };
+
+  // ── D-049: data-driven run ────────────────────────────────────────
+  const openDataRun = async (flowId: string) => {
+    if (dataRunFlow === flowId) { setDataRunFlow(null); return; }
+    setDataRunFlow(flowId);
+    setDataBindings([]); setDataFile(null); setDataRunId(null);
+    setDataProgress([]); setDataError(""); setDataDone(false);
+    try {
+      const r = await fetch(`${API}/api/datarun/bindings/${encodeURIComponent(flowId)}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+      const j = await r.json();
+      setDataBindings(j.bindings || []);
+    } catch (err) {
+      setDataError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const downloadTemplate = async () => {
+    if (!dataRunFlow) return;
+    try {
+      const r = await fetch(`${API}/api/datarun/template`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flow_id: dataRunFlow, bindings: dataBindings }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${dataRunFlow}_data_template.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setDataError(`Could not download the template: ${err}`);
+    }
+  };
+
+  const startDataRun = async () => {
+    if (!dataRunFlow || !dataFile) return;
+    const sid = Array.from(selected)[0];
+    if (!sid) { setDataError("Select a system card first."); return; }
+    setDataBusy(true); setDataError(""); setDataProgress([]); setDataDone(false);
+    try {
+      const body = new FormData();
+      body.append("sid", sid);
+      body.append("flow_id", dataRunFlow);
+      body.append("bindings", JSON.stringify(dataBindings));
+      body.append("dataset", dataFile as Blob);
+      const r = await fetch(`${API}/api/datarun/start`, { method: "POST", body });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+      setDataRunId(j.run_id);
+      // Live per-row progress — a 20-row screen replay takes minutes, so
+      // the operator watches rows tick past rather than a spinner.
+      const es = new EventSource(`${API}/api/datarun/events/${j.run_id}`);
+      es.onmessage = (ev) => {
+        const p: DataProgress = JSON.parse(ev.data);
+        setDataProgress(prev => [...prev, p]);
+        if (p.type === "run_done") { es.close(); setDataDone(true); setDataBusy(false); }
+      };
+      es.onerror = () => { es.close(); setDataBusy(false); };
+    } catch (err) {
+      setDataError(err instanceof Error ? err.message : String(err));
+      setDataBusy(false);
     }
   };
 
@@ -216,6 +301,11 @@ export default function Landscape() {
                             title="View recorded steps"
                             style={{ color: viewingFlow === f.flow_id ? "var(--blue)" : "var(--text-3)",
                                       cursor: "pointer", paddingLeft: 2 }}>👁</span>
+                      {/* D-049: replay this recording once per row of a data sheet */}
+                      <span onClick={() => openDataRun(f.flow_id)}
+                            title="Run with data — replay this recording once per spreadsheet row and produce an evidence document"
+                            style={{ color: dataRunFlow === f.flow_id ? "var(--blue)" : "var(--text-3)",
+                                      cursor: "pointer", paddingLeft: 2 }}>▦</span>
                       {/* D-036: delete a recording */}
                       {confirming ? (
                         <>
@@ -233,6 +323,110 @@ export default function Landscape() {
                     </span>
                   );
                 })}
+              </div>
+            )}
+
+            {/* D-049: record once → data sheet → one run per row → evidence */}
+            {dataRunFlow && (
+              <div className="panel" style={{ marginTop: 12, padding: "12px 14px", borderRadius: 10 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>
+                  Run with data — {dataRunFlow}
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--text-3)", marginBottom: 10 }}>
+                  Replays this recording once per spreadsheet row and produces a Word/PDF
+                  evidence document with the screenshots for each row. Every other recorded
+                  step is replayed exactly as captured.
+                </div>
+
+                {dataError && (
+                  <div style={{ fontSize: 12, color: "var(--red)", marginBottom: 8 }}>{dataError}</div>
+                )}
+
+                {dataBindings.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "var(--text-3)" }}>
+                    This recording has no editable fields to vary.
+                  </div>
+                ) : (
+                  <>
+                    <table style={{ width: "100%", fontSize: 11.5, borderCollapse: "collapse",
+                                     marginBottom: 10 }}>
+                      <thead>
+                        <tr style={{ color: "var(--text-3)", textAlign: "left" }}>
+                          <th style={{ padding: "3px 6px" }}>Screen field</th>
+                          <th style={{ padding: "3px 6px" }}>Spreadsheet column</th>
+                          <th style={{ padding: "3px 6px" }}>Recorded sample</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dataBindings.map((b, i) => (
+                          <tr key={b.step_index} style={{ borderTop: "1px solid var(--hairline)" }}>
+                            <td style={{ padding: "3px 6px" }}>{b.label}</td>
+                            <td style={{ padding: "3px 6px" }}>
+                              <input className="input" value={b.column}
+                                     onChange={e => setDataBindings(prev =>
+                                       prev.map((x, k) => k === i ? { ...x, column: e.target.value } : x))}
+                                     style={{ fontSize: 11.5, padding: "2px 6px", width: 160 }} />
+                            </td>
+                            <td style={{ padding: "3px 6px", color: "var(--text-3)" }}>
+                              {String(b.recorded_value ?? "")}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                      <button className="btn secondary" style={{ fontSize: 11.5, padding: "4px 10px" }}
+                              onClick={downloadTemplate}>⬇ Download template</button>
+                      <input type="file" accept=".xlsx,.xlsm,.json"
+                             onChange={e => setDataFile(e.target.files?.[0] ?? null)}
+                             style={{ fontSize: 11.5 }} />
+                      <button className="btn" style={{ fontSize: 11.5, padding: "4px 12px" }}
+                              disabled={!dataFile || dataBusy || selected.size === 0}
+                              onClick={startDataRun}>
+                        {dataBusy ? "Running…" : "▶ Run with data"}
+                      </button>
+                      {selected.size === 0 && (
+                        <span style={{ fontSize: 11, color: "var(--text-3)" }}>
+                          select a system card first
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {dataProgress.length > 0 && (
+                  <div style={{ marginTop: 10, maxHeight: 260, overflowY: "auto",
+                                 fontSize: 11.5 }}>
+                    {dataProgress.filter(p => p.type === "iteration_done").map((p, i) => (
+                      <div key={i} style={{ padding: "3px 0",
+                                             borderTop: "1px solid var(--hairline)",
+                                             color: p.ok ? "var(--green)" : "var(--red)" }}>
+                        {p.ok ? "✓" : "✗"} Row {p.index}/{p.total}
+                        <span style={{ color: "var(--text-2)", marginLeft: 8 }}>
+                          {p.outcome || p.error || ""}
+                        </span>
+                      </div>
+                    ))}
+                    {dataProgress.some(p => p.type === "run_error") && (
+                      <div style={{ color: "var(--red)", paddingTop: 6 }}>
+                        {dataProgress.find(p => p.type === "run_error")?.error}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {dataDone && dataRunId && (
+                  <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center" }}>
+                    <span style={{ fontSize: 12, fontWeight: 600 }}>Evidence document:</span>
+                    <a className="btn secondary" style={{ fontSize: 11.5, padding: "4px 10px",
+                                                           textDecoration: "none" }}
+                       href={`${API}/api/datarun/report/${dataRunId}/docx`}>Word</a>
+                    <a className="btn secondary" style={{ fontSize: 11.5, padding: "4px 10px",
+                                                           textDecoration: "none" }}
+                       href={`${API}/api/datarun/report/${dataRunId}/pdf`}>PDF</a>
+                  </div>
+                )}
               </div>
             )}
 

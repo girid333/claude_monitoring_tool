@@ -106,6 +106,12 @@ app.include_router(sapgui_router)
 from engine.rfc.api import router as rfc_router  # noqa: E402
 app.include_router(rfc_router)
 
+# D-049: data-driven runs (/api/datarun/*) — record once, replay per data
+# row, produce the auditor/tester evidence document. Additive in the same
+# way: own module, own router, existing run pipeline untouched.
+from engine.datarun_api import router as datarun_router  # noqa: E402
+app.include_router(datarun_router)
+
 store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}
 

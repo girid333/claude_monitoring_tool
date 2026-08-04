@@ -204,7 +204,11 @@ def overrides_for_row(bindings: list[Binding], row: dict[str, Any]) -> tuple[dic
 # it made a blocked-vendor error extract as a successful outcome, which in
 # turn marked the row PASS in an auditor's document.
 _SUCCESS_VERB = (r"(?:created|saved|posted|changed|generated|issued|released|"
-                 r"scheduled|updated|added|completed|deleted|reversed)")
+                 r"scheduled|updated|added|completed|deleted|reversed|"
+                 # Display/report transactions (SE16, SM37, ST22 …) confirm
+                 # with these rather than a created-document phrase, and are
+                 # just as much a valid outcome to evidence.
+                 r"displayed|selected|found|retrieved|listed)")
 
 # An SAP object key is NOT always numeric. Materials, customers with alpha
 # prefixes, batch numbers, equipment, and anything from a custom Z
@@ -291,11 +295,9 @@ def looks_like_error(text: str) -> bool:
     misleading."""
     if not text:
         return False
-    flat = " ".join(text.split())
-    return bool(re.search(
-        r"\b(?:error|cannot|could not|not possible|is blocked|no authorization|"
-        r"does not exist|not permitted|invalid|missing|failed|is locked|"
-        r"please enter|must be|not allowed|incorrect)\b", flat, re.I))
+    # Shares _ERROR_WORDS with extract_error() deliberately — a second copy
+    # of this list had already drifted out of step with the first.
+    return bool(re.search(_ERROR_WORDS, " ".join(text.split()), re.I))
 
 
 # ── template generation ──────────────────────────────────────────────────
