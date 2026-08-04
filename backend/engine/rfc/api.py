@@ -240,6 +240,80 @@ def odata_read(req: ODataReadRequest) -> dict:
                             req.top, req.filter, req.select)
 
 
+# ── API flows (D-048): compose, save, replay ─────────────────────────────
+
+class SaveFlowRequest(BaseModel):
+    flow: dict
+
+
+@router.post("/flows/save")
+def save_api_flow(req: SaveFlowRequest) -> dict:
+    from ..apiflow.schema import ApiFlow, safe_flow_id, save_flow
+    flow = ApiFlow.from_dict(req.flow)
+    if not safe_flow_id(flow.flow_id):
+        raise HTTPException(400, "invalid flow_id")
+    problems = flow.validate()
+    if problems:
+        # Reject BEFORE saving — an invalid flow that fails halfway through
+        # would already have made real calls against SAP.
+        return {"ok": False, "problems": problems}
+    path = save_flow(flow)
+    return {"ok": True, "flow_id": flow.flow_id, "path": str(path),
+            "step_count": len(flow.steps)}
+
+
+@router.get("/flows")
+def list_api_flows() -> list[dict]:
+    from ..apiflow.schema import list_flows
+    return list_flows()
+
+
+@router.get("/flows/{flow_id}")
+def get_api_flow(flow_id: str) -> dict:
+    from ..apiflow.schema import load_flow, safe_flow_id
+    if not safe_flow_id(flow_id):
+        raise HTTPException(400, "invalid flow_id")
+    try:
+        return load_flow(flow_id).as_dict()
+    except FileNotFoundError:
+        raise HTTPException(404, "flow not found")
+
+
+@router.delete("/flows/{flow_id}")
+def delete_api_flow(flow_id: str) -> dict:
+    from ..apiflow.schema import delete_flow, safe_flow_id
+    if not safe_flow_id(flow_id):
+        raise HTTPException(400, "invalid flow_id")
+    if not delete_flow(flow_id):
+        raise HTTPException(404, "flow not found")
+    return {"deleted": True, "flow_id": flow_id}
+
+
+class RunFlowRequest(BaseModel):
+    sid: str
+    flow_id: str = ""
+    flow: Optional[dict] = None       # run an unsaved draft directly
+    params: dict = {}
+
+
+@router.post("/flows/run")
+def run_api_flow(req: RunFlowRequest) -> dict:
+    """Replay a flow. Accepts a saved flow_id or an inline draft, so the
+    composer can test before saving."""
+    from ..apiflow.schema import ApiFlow, load_flow, safe_flow_id
+    from ..apiflow.runner import run_flow
+    if req.flow is not None:
+        flow = ApiFlow.from_dict(req.flow)
+    else:
+        if not safe_flow_id(req.flow_id):
+            raise HTTPException(400, "invalid flow_id")
+        try:
+            flow = load_flow(req.flow_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "flow not found")
+    return run_flow(_client_for(req.sid), flow, req.params).as_dict()
+
+
 @router.post("/run")
 def run_checks(req: RunRfcRequest) -> dict:
     client = _client_for(req.sid)
