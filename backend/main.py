@@ -112,6 +112,13 @@ app.include_router(rfc_router)
 from engine.datarun_api import router as datarun_router  # noqa: E402
 app.include_router(datarun_router)
 
+# D-050: Health Check Dashboard (/api/health/*) — imports SAP's Automated
+# Health Check workbook and triages every check. Self-contained module
+# (backend/health/, no imports from engine/ or v1_core/), own store dir
+# (HEALTH_STORAGE_DIR), mounted with one line like the others.
+from health.router import router as health_router  # noqa: E402
+app.include_router(health_router)
+
 store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}
 

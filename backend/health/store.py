@@ -1,0 +1,60 @@
+"""File store for imported health reports: one JSON per report + index.
+Own directory (HEALTH_STORAGE_DIR, default ./data/health) — isolated from
+every other module's storage. Writes are atomic (tmp + rename)."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import threading
+from pathlib import Path
+
+from .models import HealthReport, ReportListItem
+
+_lock = threading.Lock()
+_ID = re.compile(r"^[a-f0-9]{12}$")
+
+
+class HealthStore:
+    def __init__(self, root: str | Path | None = None):
+        self.root = Path(root or os.environ.get("HEALTH_STORAGE_DIR", "data/health"))
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, rid: str) -> Path:
+        if not _ID.match(rid):
+            raise KeyError(rid)          # also blocks path traversal
+        return self.root / f"{rid}.json"
+
+    def save(self, rep: HealthReport) -> None:
+        with _lock:
+            tmp = self._path(rep.id).with_suffix(".tmp")
+            tmp.write_text(rep.model_dump_json())
+            tmp.replace(self._path(rep.id))
+
+    def get(self, rid: str) -> HealthReport:
+        p = self._path(rid)
+        if not p.exists():
+            raise KeyError(rid)
+        return HealthReport.model_validate_json(p.read_text())
+
+    def delete(self, rid: str) -> None:
+        with _lock:
+            p = self._path(rid)
+            if not p.exists():
+                raise KeyError(rid)
+            p.unlink()
+
+    def list(self) -> list[ReportListItem]:
+        out = []
+        for p in self.root.glob("*.json"):
+            try:
+                rep = HealthReport.model_validate_json(p.read_text())
+            except Exception:  # noqa: BLE001 — a corrupt file must not break the list
+                continue
+            out.append(ReportListItem(
+                id=rep.id, filename=rep.filename, imported_at=rep.imported_at,
+                report_date=rep.report_date, sid=rep.system.sid,
+                client=rep.system.client, summary=rep.summary))
+        out.sort(key=lambda r: (r.report_date or "", r.imported_at), reverse=True)
+        return out

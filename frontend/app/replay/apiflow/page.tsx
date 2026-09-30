@@ -15,7 +15,7 @@
    here. */
 
 import { useEffect, useState } from "react";
-import { apiBase } from "../lib/api";
+import { apiBase } from "../../lib/api";
 
 const API = apiBase();
 

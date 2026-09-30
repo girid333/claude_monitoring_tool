@@ -1,4 +1,5 @@
-"""D-049d UI E2E: the full data-run workflow from the Landscape page.
+"""D-049d UI E2E: the full data-run workflow from the Record and replay page
+(the old Landscape page's flow panel, moved to /replay in D-050).
 
 Mirrors what Giri will do for the SE16 test: pick a system, open a
 recording's "run with data" panel, download the template, upload a filled
@@ -26,8 +27,8 @@ with sync_playwright() as p:
     errs = []
     pg.on("pageerror", lambda e: errs.append(str(e)))
 
-    pg.goto(f"{BASE}/", wait_until="networkidle")
-    check("1. Landscape loads with the recording listed",
+    pg.goto(f"{BASE}/replay", wait_until="networkidle")
+    check("1. Record and replay page loads with the recording listed",
           "se16_display" in pg.content(), pg.inner_text("body")[:200])
 
     # select the system card (the run needs a target)

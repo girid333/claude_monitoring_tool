@@ -8,7 +8,7 @@
    the previous design needed a real display and was disabled with a 501. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiBase } from "../lib/api";
+import { apiBase } from "../../lib/api";
 
 const API = apiBase();
 
@@ -192,7 +192,7 @@ export default function RecorderPage() {
       {saved && (
         <div style={{ margin: "0 0 16px", padding: "10px 14px", borderRadius: 10,
                        border: "1px solid var(--green)", color: "var(--green)", fontSize: 12.5 }}>
-          ✓ {saved} — run it from Landscape with &quot;Functional flows&quot; ticked.
+          ✓ {saved} — run it from <a href="/replay" style={{ color: "inherit", textDecoration: "underline" }}>Record and replay</a> with &quot;Functional flows&quot; ticked.
         </div>
       )}
 

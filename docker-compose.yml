@@ -25,6 +25,9 @@ services:
       # specific origins in .env (CORS_ORIGINS=https://your-host) if this
       # ever needs to be internet-facing or multi-tenant.
       - CORS_ORIGINS=*
+      # D-050: Health Check Dashboard imports live on the same persistent
+      # volume as runs.db/flows/reports (backend_data -> /data).
+      - HEALTH_STORAGE_DIR=/data/health
       # SAP_<SID>_USER / SAP_<SID>_PASSWORD / REGISTRY_ENCRYPTION_KEY
       # (D-018/D-023): define these in a .env file (docker compose loads it
       # automatically) rather than listing them individually here.

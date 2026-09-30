@@ -14,3 +14,4 @@ runs.db-journal
 systems.json
 .next/
 *.tsbuildinfo
+_incoming/

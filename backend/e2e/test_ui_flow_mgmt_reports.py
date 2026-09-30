@@ -32,11 +32,14 @@ with sync_playwright() as p:
     b=p.chromium.launch(headless=True,args=["--proxy-bypass-list=<-loopback>,127.0.0.1,localhost"])
     pg=b.new_page(); errs=[]
     pg.on("pageerror", lambda e: errs.append(str(e)))
-    pg.goto(f"{BASE}/", wait_until="networkidle")
+    # D-050: Core BASIS lives on /basis, the flow library on /replay.
+    pg.goto(f"{BASE}/basis", wait_until="networkidle")
 
     # 2) Core BASIS unchecked by default
     cb = pg.query_selector("input[type=checkbox]")
     check("1. Core BASIS is UNCHECKED by default", cb and not cb.is_checked())
+
+    pg.goto(f"{BASE}/replay", wait_until="networkidle")
 
     # 3) search + bulk select present
     check("2. Flow search box present",

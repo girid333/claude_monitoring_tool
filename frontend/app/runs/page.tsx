@@ -2,7 +2,8 @@
 
 /* Runs — HISTORY ONLY (D-031).
 
-   Execution lives in exactly one place: the Landscape page. This page used
+   Execution lives in exactly one place per section: the Landscape page
+   (/basis, Core BASIS) and Record and replay (/replay, recordings) — D-050. This page used
    to have its own launcher (D-029), which meant two competing run buttons
    and two copies of the live-status logic. Landscape won because that's
    where the systems are, and the run state now lives in RunContext so
@@ -76,7 +77,9 @@ export default function Runs() {
       <p className="lsub">
         <b>{coreBasisRuns.length} Core BASIS runs</b> · <b>{flowRuns.length} flow runs</b>
         {" · start a run from "}
-        <Link href="/" style={{ color: "var(--blue)" }}>Landscape</Link>
+        <Link href="/basis" style={{ color: "var(--blue)" }}>Landscape</Link>
+        {" or "}
+        <Link href="/replay" style={{ color: "var(--blue)" }}>Record and replay</Link>
       </p>
 
       {run.isRunning && (
@@ -86,7 +89,7 @@ export default function Runs() {
           <span style={{ fontSize: 12.5, color: "var(--text-2)" }}>
             {run.phase || "Run in progress…"}
           </span>
-          <Link href="/" className="btn secondary" style={{ marginLeft: "auto", fontSize: 11.5,
+          <Link href="/basis" className="btn secondary" style={{ marginLeft: "auto", fontSize: 11.5,
                                                              padding: "4px 10px", textDecoration: "none" }}>
             View progress
           </Link>
@@ -111,7 +114,7 @@ export default function Runs() {
         <div className="list">
           {flowRuns.length === 0 && (
             <div className="row"><span className="rsub">
-              No flow runs yet — run one from <Link href="/" style={{ color: "var(--blue)" }}>Landscape</Link> with
+              No flow runs yet — run one from <Link href="/replay" style={{ color: "var(--blue)" }}>Record and replay</Link> with
               &quot;Functional flows&quot; ticked.
             </span></div>
           )}
@@ -144,7 +147,7 @@ export default function Runs() {
         <div className="list">
           {coreBasisRuns.length === 0 && (
             <div className="row"><span className="rsub">
-              No Core BASIS runs yet — go to <Link href="/" style={{ color: "var(--blue)" }}>Landscape</Link>,
+              No Core BASIS runs yet — go to <Link href="/basis" style={{ color: "var(--blue)" }}>Landscape</Link>,
               select a system, tick &quot;Core BASIS sweep&quot; and press Execute.
             </span></div>
           )}

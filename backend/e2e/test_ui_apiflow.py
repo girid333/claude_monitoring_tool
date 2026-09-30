@@ -25,9 +25,9 @@ with sync_playwright() as p:
     errs = []
     pg.on("pageerror", lambda e: errs.append(str(e)))
 
-    pg.goto(f"{BASE}/apiflow", wait_until="networkidle")
+    pg.goto(f"{BASE}/replay/apiflow", wait_until="networkidle")   # D-050
     check("1. API Flows page loads", "API Flows" in pg.content())
-    check("2. Nav entry present", pg.query_selector("a[href='/apiflow']") is not None)
+    check("2. Nav entry present", pg.query_selector("a[href='/replay/apiflow']") is not None)
 
     # Services must be PROBED — only callable ones are offered.
     pg.click("button:has-text('Load available services')")

@@ -32,8 +32,9 @@ with sync_playwright() as p:
     check("2. Runs page points to Landscape", pg.query_selector("text=/start a run from/i") is not None)
 
     # 2. Landscape: select + execute
-    pg.goto(f"{BASE}/", wait_until="networkidle")
+    pg.goto(f"{BASE}/basis", wait_until="networkidle")   # D-050: Landscape moved from "/"
     pg.wait_for_selector("text=PRG", timeout=8000).click()
+    pg.check("label:has-text('Core BASIS sweep') input[type=checkbox]")  # D-036: off by default
     check("3. Landscape has the Execute control", pg.query_selector("button:has-text('Execute')") is not None)
     pg.click("button:has-text('Execute')")
 
@@ -63,7 +64,7 @@ with sync_playwright() as p:
     pg.wait_for_selector("text=+ Add System", timeout=8000)
     nav_dot = pg.query_selector("nav .pulse")
     check("8. Sidebar shows live run indicator from another page", nav_dot is not None)
-    pg.click("a[href='/']")
+    pg.click("a[href='/basis']")
     pg.wait_for_selector("text=Landscape", timeout=8000)
     try:
         pg.wait_for_selector(".tchip", timeout=6000)

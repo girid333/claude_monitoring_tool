@@ -17,7 +17,7 @@
    below, then record/replay using SAP GUI Scripting on that machine. */
 
 import { useEffect, useRef, useState } from "react";
-import { apiBase } from "../lib/api";
+import { apiBase } from "../../lib/api";
 
 const API = apiBase();
 const WS_BASE = API.replace(/^http/, "ws");

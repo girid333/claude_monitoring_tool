@@ -304,6 +304,83 @@ machine that can reach the host: logs in, runs the capability probe (D-005),
 screenshots the result, reports whether scripting is available. This is the
 actual mechanism to resolve OQ-2, still pending Giri running it.
 
+### D-050 (2026-09-30) — Landing page, three sections, Health Check Dashboard.
+Giri's direction: production readiness. Record/replay is unreliable beyond SM37,
+so it moves to its own "Lab" section (/replay); Core BASIS monitoring (/basis)
+must work flawlessly; new landing (/) and a CAS-style dashboard (/health).
+
+**Health Check Dashboard = triage, not a re-skin.** Imports SAP's Automated
+Health Check workbook (SpreadsheetML ".XLS" or .xlsx), re-reads each evidence
+tab and classifies every check: act / review / expected / ok / no_data.
+Module `backend/health/` (isolated; one include_router line; own store dir).
+Built in Claude.ai against Giri's real R5P export (kept out of the repo): SAP's
+8 flags -> 4 act, 1 review, 3 expected. Rings on landing + dashboard: outer =
+passed SAP's check, inner = no action after triage; the gap is removed noise.
+
+**Hard-won facts (real exports):**
+- SAP emits `&#0;` char refs (DB02 "NONE&#0;&#0;…") — illegal XML; stripped
+  before parsing. DOCTYPE refused (entity-expansion safety).
+- Table signature: header row, then a blank row that KEEPS the header's cell
+  count; data rows may be separated by zero-cell `<Row/>` (ST06) — so blank rows
+  do not end a table. xlsx loses that distinction: headers additionally must
+  follow a blank/title row and contain no numeric/date cells.
+- ST06 numbers are European ("0,16", "1.366" = 1366); ST02 are not.
+- Monitors→tab mapping is not 1:1: "Certificate Info"→Cert_Info,
+  RSRFCCHK→RFC_Con, DB02 appears twice (Alerts / Availability Log), and
+  "Memory Usage" is labelled DB12 but its tab is DB02_Memory.
+- SAP false alarms the triage explains: SM12 long locks held by bgRFC server
+  registration / FDC timer daemon / SMON; SLICENSE "Valid (inactive Hardware
+  Key)" (HA partner); DB02 availability log "no event >24h" = stable;
+  SM04 high priority for bgRFC schedulers.
+- Real findings SAP only hinted at: foreign-SID instances in SMLG groups (a
+  group with no local instance can't balance logons); the exact expiring
+  certificate and PSE; SM21 EBI with continuation lines naming the job and
+  missing batch user.
+- Analysers never fail an import: a crash falls back to SAP's verdict with a
+  visible note. `/api/health/reports/latest` returns null (not 404) when empty.
+- UI regression worth keeping: grid tracks need minmax(0,1fr) or a wide
+  evidence table pushes the drawer off-screen; the test was proven to fail
+  on the original bug.
+
+**D-050 integration (2026-09-30, Cowork) — how it landed in the repo.**
+- Routes: `/` = Sentinel landing; `/basis` = Landscape (Core BASIS only —
+  flow panel, step viewer and data-run panel removed, link to /replay added;
+  the D-036 "Core BASIS off by default" checkbox kept as-is); `/health` =
+  dashboard; `/replay` = the old Landscape's flow library / step viewer /
+  replay / data runs, moved unmodified minus the Core BASIS checkbox;
+  `/replay/recorder`, `/replay/apiflow`, `/replay/sapgui` (git mv).
+  `/systems`, `/runs`, `/reports`, `/rfc` unchanged. Old `/recorder`,
+  `/apiflow`, `/sapgui` redirect (next.config.ts). No API route changed;
+  nothing under `engine/` changed.
+- Chrome: `Shell` steps aside on `/` and `/health` (they render their own
+  `.sx` TopBar); every other page gets the same TopBar (sticky `.sx`
+  wrapper with `minHeight:0` — `.sx` is written for full pages) plus a
+  section-scoped sidebar: Monitoring (Landscape/Systems/Runs/Reports/RFC)
+  or Lab (Recordings/Recorder/API Flows/SAP GUI + Systems/Reports).
+  Replay entry points are no longer in Monitoring's navigation.
+- `lib/sentinelApi.apiBase()` delegates to `app/lib/api.ts` (D-024);
+  tsconfig gained the `@/*` alias. TopBar's `aria-current` needed
+  `"page" as const` (non-strict tsconfig widens it to string) and now also
+  highlights Monitoring on /systems, /runs, /reports, /rfc.
+- Backend: `backend/health/` copied as-is, one `include_router` line in
+  main.py; compose sets `HEALTH_STORAGE_DIR=/data/health` (backend_data
+  volume). python-multipart was already in requirements (D-049).
+- Tests: health suites added (22 parser + 8 API + 7 UI, 1 opt-in skip).
+  Pre-existing stale UI suites repaired against the D-031/D-036 UI and the
+  new routes: `test_ui_landscape` (Run sweep/Bulk run → Execute + progress
+  panel, plus D-050 assertions: no replay entry points, link to /replay),
+  `test_ui_systems_runs` (launcher is /basis, not Runs),
+  `test_ui_detail_and_delete` / `test_ui_progress_and_nav` (tick Core
+  BASIS before Execute). `test_ui_datarun`, `test_ui_flow_mgmt_reports`,
+  `test_ui_apiflow` repointed to /replay paths.
+- **UI-suite fixtures (were undocumented, cost time):** datarun UI needs
+  F4H → `fake_sap_se16` (:8093) plus a `se16_display` recording made with
+  Start-at-T-code=SE16 and `/tmp/dr_data.xlsx`; rfc/apiflow UI need F4H →
+  `fake_sap_soap` (:8095) with MONITOR/secret; flow_mgmt_reports needs the
+  backend's CWD/RUNS_DB at `/tmp/e2e/data`. `killall node` does NOT stop
+  `next start` (process is `next-server`) — a stale server silently serves
+  the previous build.
+
 ---
 
 ## 3. Architecture Snapshot
@@ -732,6 +809,17 @@ flows" and "Datasets" library pages from the mockup's sidebar were not
 built (weren't in the three requested priorities). Next: Giri runs the live
 probe script and reports results — that unblocks the real Phase 1 live-
 system checklist in README.md.
+
+**2026-09-30 — D-050 integration (Cowork).** Integrated the Sentinel
+package from `_incoming/sentinel_d050/` on branch `d050-landing-dashboard`:
+route split (/, /basis, /health, /replay), TopBar across sections, Health
+Check backend module + suites. Baseline run of every existing e2e suite
+BEFORE changes, then again after: no regressions; four UI suites that were
+already stale pre-D-050 repaired (details in the D-050 integration note).
+Docker rebuild + hand verification on 192.168.0.165 left to Giri (not
+reachable from the Cowork sandbox). NOTE: this repo SKILL.md was last
+synced at Session 8 (D-020); D-021…D-049 live in the account-level skill
+and should be synced back here.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

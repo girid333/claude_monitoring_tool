@@ -7,6 +7,15 @@ import type { NextConfig } from "next";
 // identical line in sap_monitoring/frontend/next.config.ts).
 const nextConfig: NextConfig = {
   output: "standalone",
+  // D-050: record/replay pages moved under /replay. Old bookmarks keep
+  // working; "/" itself is now the Sentinel landing page (Landscape is /basis).
+  async redirects() {
+    return [
+      { source: "/recorder", destination: "/replay/recorder", permanent: false },
+      { source: "/apiflow", destination: "/replay/apiflow", permanent: false },
+      { source: "/sapgui", destination: "/replay/sapgui", permanent: false },
+    ];
+  },
 };
 
 export default nextConfig;

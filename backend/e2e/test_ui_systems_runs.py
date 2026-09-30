@@ -23,14 +23,20 @@ with sync_playwright() as p:
     pg.click(".modal-content button:has-text('Add system')")
     pg.wait_for_selector("text=E2E Test System", timeout=10000)
     check("A1. Add System via modal -> row appears", True)
+    # D-031 moved the launcher from Runs to Landscape; D-050 moved Landscape
+    # to /basis. (Stale before D-050: this still used the removed Runs launcher.)
     pg.goto(f"{BASE}/runs", wait_until="networkidle")
-    pg.wait_for_selector("text=Start a run")
-    pg.click("button:has-text('E2E Test System')")
-    btn = pg.wait_for_selector("button:has-text('Execute 1 system')", timeout=5000)
-    check("A2. Runs launcher: chip select + Execute enabled", not btn.is_disabled())
+    check("A1b. Runs page is history-only and points to the launcher",
+          pg.query_selector("text=/start a run from/i") is not None
+          and pg.query_selector("button:has-text('Execute')") is None)
+    pg.goto(f"{BASE}/basis", wait_until="networkidle")
+    pg.click("text=E2E Test System")
+    pg.check("label:has-text('Core BASIS sweep') input[type=checkbox]")
+    btn = pg.wait_for_selector("button:has-text('Execute')", timeout=5000)
+    check("A2. Landscape launcher: card select + Execute enabled", not btn.is_disabled())
     btn.click()
     try:
-        pg.wait_for_selector("text=/Starting run|Processing E2E/", timeout=10000)
+        pg.wait_for_selector("text=/Starting run|Processing E2E|logging in|Run in progress/", timeout=10000)
         check("A3. Execute -> live status appears", True)
     except Exception as e:
         check("A3. Execute -> live status appears", False, str(e)[:150])

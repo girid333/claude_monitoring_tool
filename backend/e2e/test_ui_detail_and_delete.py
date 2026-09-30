@@ -21,8 +21,9 @@ with sync_playwright() as p:
     pg = b.new_page(); errs=[]
     pg.on("pageerror", lambda e: errs.append(str(e)))
     # run once so there's history + a report
-    pg.goto(f"{BASE}/", wait_until="networkidle")
+    pg.goto(f"{BASE}/basis", wait_until="networkidle")   # D-050: Landscape moved from "/"
     pg.wait_for_selector("text=DTL", timeout=8000).click()
+    pg.check("label:has-text('Core BASIS sweep') input[type=checkbox]")  # D-036: off by default
     pg.click("button:has-text('Execute')")
     pg.wait_for_selector("text=/Run complete|Run finished with errors/", timeout=40000)
     # every chip must be resolved (none left blue/running)
