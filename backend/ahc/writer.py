@@ -9,6 +9,7 @@ a workbook written here imports like one SAP produced.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -103,12 +104,16 @@ class _Rows:
         self.pending_index = True
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+
+
 def _cell(v: str, style: Optional[str] = BODY, merge: int = 0) -> str:
     st = f' ss:StyleID="{style}"' if style else ""
     mg = f' ss:MergeAcross="{merge}"' if merge else ""
     if v is None:
         return f"<Cell{mg}{st}/>"
-    return f'<Cell{mg}{st}><Data ss:Type="String">{escape(str(v))}</Data></Cell>'
+    text = _CTRL.sub("", str(v))[:32767]      # XML 1.0 forbids control chars; Excel's cell limit
+    return f'<Cell{mg}{st}><Data ss:Type="String">{escape(text)}</Data></Cell>'
 
 
 def _title_rows(r: _Rows, title: str, subtitle: str, sub_merge: int) -> None:
@@ -191,9 +196,21 @@ def _text(r: _Rows, t: TextTab, meta: Optional[dict] = None) -> None:
     r.width = 4
 
 
+def _span(row_xml: str) -> int:
+    """Columns a written <Row> reaches (cells + MergeAcross)."""
+    cells = re.findall(r"<Cell\b([^>]*)", row_xml)
+    return sum(1 + int((re.search(r'ss:MergeAcross="(\d+)"', c) or [0, 0])[1]) for c in cells)
+
+
 def _sheet(name: str, columns_xml: str, body: list[str], width: int, nrows: int) -> str:
-    return (f'<Worksheet ss:Name="{escape(name)}"><Table ss:ExpandedColumnCount="{max(width, 1)}" '
-            f'ss:ExpandedRowCount="{nrows + 1}" x:FullColumns="1" x:FullRows="1" '
+    # Excel refuses the whole file when a sheet uses more columns (cells,
+    # merges or <Column> definitions) than ExpandedColumnCount declares, so
+    # both counts are taken from what is actually written.
+    ncols = len(re.findall(r"<Column\b", columns_xml)) + sum(
+        int(x) for x in re.findall(r'<Column\b[^>]*ss:Span="(\d+)"', columns_xml))
+    width = max([width, ncols, 1] + [_span(r) for r in body])
+    return (f'<Worksheet ss:Name="{escape(name)}"><Table ss:ExpandedColumnCount="{width}" '
+            f'ss:ExpandedRowCount="{max(nrows, 1) + 1}" x:FullColumns="1" x:FullRows="1" '
             f'ss:DefaultRowHeight="14.4">{columns_xml}' + "".join(body) + f"</Table>{WS_OPTS}</Worksheet>\n")
 
 

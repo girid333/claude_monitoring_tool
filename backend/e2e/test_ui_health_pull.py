@@ -105,12 +105,17 @@ def test_01_pull_shows_dashboard_and_exports_workbook(page, tmp_path):
     with page.expect_download() as dl:
         page.get_by_test_id("sx-export").click()
     d = dl.value
-    assert d.suggested_filename.upper().endswith(".XLS")
+    assert d.suggested_filename.endswith(".xlsx")
     path = tmp_path / d.suggested_filename
     d.save_as(path)
+    from openpyxl import load_workbook
+    wb = load_workbook(path)                                    # a real Office Open XML workbook
+    assert wb.sheetnames == [s["name"] for s in LAYOUT["sheets"]]
     sheets = read_workbook(path.read_bytes(), path.name)
     assert list(sheets) == [s["name"] for s in LAYOUT["sheets"]]
-    assert b"secret" not in path.read_bytes()
+    import zipfile
+    with zipfile.ZipFile(path) as z:
+        assert not any(b"secret" in z.read(n) for n in z.namelist())
     assert not page.errors, page.errors
 
 

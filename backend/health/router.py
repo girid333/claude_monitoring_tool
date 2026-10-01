@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -15,6 +16,7 @@ from .analyze import analyze
 from .models import HealthReport, ReportListItem
 from .store import HealthStore
 from .workbook import MAX_BYTES, WorkbookError, read_workbook
+from .xlsx_export import XLSX_MIME, spreadsheetml_to_xlsx
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 _store: HealthStore | None = None
@@ -77,13 +79,26 @@ def delete_report(rid: str) -> None:
 
 
 @router.get("/reports/{rid}/workbook")
-def download_workbook(rid: str) -> Response:
-    """D-051: the report as SAP's AHC workbook (SpreadsheetML .XLS) — the
-    uploaded original, or the workbook a direct pull generated."""
+def download_workbook(rid: str, format: str = "xlsx") -> Response:
+    """D-051: the report's AHC workbook. Default .xlsx (converted, opens in
+    every Excel); format=xls returns the stored SpreadsheetML unchanged —
+    the uploaded original or the workbook a direct pull generated."""
     try:
         rep, data = store().get(rid), store().workbook(rid)
     except KeyError:
         raise HTTPException(404, "No workbook stored for this report.") from None
-    name = rep.filename if rep.filename.upper().endswith((".XLS", ".XML")) else f"{rep.filename}.XLS"
-    return Response(data, media_type="application/vnd.ms-excel",
-                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    stem = re.sub(r"\.(xls|xml|xlsx)$", "", rep.filename, flags=re.I) or f"AHC_{rid}"
+    stem = re.sub(r'[^A-Za-z0-9._ -]', "_", stem)
+    if format.lower() == "xls":
+        ext = "xlsx" if data[:2] == b"PK" else "XLS"
+        mime = XLSX_MIME if ext == "xlsx" else "application/vnd.ms-excel"
+        return Response(data, media_type=mime,
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.{ext}"'})
+    if format.lower() != "xlsx":
+        raise HTTPException(400, "format must be xlsx or xls")
+    try:
+        out = spreadsheetml_to_xlsx(data)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"Could not convert the workbook to .xlsx: {exc}") from exc
+    return Response(out, media_type=XLSX_MIME,
+                    headers={"Content-Disposition": f'attachment; filename="{stem}.xlsx"'})

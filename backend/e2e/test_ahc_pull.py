@@ -15,9 +15,11 @@ Proves:
 Set HEALTH_REAL_AHC=/path/to/SAP_export.XLS to also compare the structure
 against a real SAP export.
 """
+import io
 import json
 import os
 import re
+import zipfile
 import subprocess
 import sys
 import time
@@ -33,7 +35,8 @@ sys.path.insert(0, str(BACKEND))
 for k in ("NO_PROXY", "no_proxy"):
     os.environ[k] = "127.0.0.1,localhost"
 
-from ahc.layout_check import sheet_signature  # noqa: E402
+from ahc.layout_check import excel_problems, sheet_signature  # noqa: E402
+from health.xlsx_export import XLSX_MIME, spreadsheetml_to_xlsx  # noqa: E402
 from ahc.run import pull  # noqa: E402
 from ahc.sap import READ_ONLY_FMS  # noqa: E402
 from engine.rfc.soap_client import RfcSoapClient, RfcSoapError  # noqa: E402
@@ -46,6 +49,26 @@ WEBGUI = f"{BASE}/sap/bc/gui/sap/its/webgui"
 USER, PASSWORD = "MONITOR", "secret"
 LAYOUT = __import__("json").loads((BACKEND / "ahc" / "layout.json").read_text())
 NS = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
+
+
+def xlsx_text(data: bytes) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        return b"".join(z.read(n) for n in z.namelist())
+
+
+def assert_valid_xlsx(data: bytes, sheets=None):
+    """A real .xlsx: a zip whose parts are well-formed XML, that openpyxl
+    loads, with every AHC tab in order and the Monitors styling intact."""
+    from openpyxl import load_workbook
+    assert data[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        assert z.testzip() is None
+        for n in z.namelist():
+            if n.endswith(".xml") or n.endswith(".rels"):
+                ET.fromstring(z.read(n))
+    wb = load_workbook(io.BytesIO(data))
+    assert wb.sheetnames == (sheets or [s["name"] for s in LAYOUT["sheets"]])
+    return wb
 
 
 def fake(path: str):
@@ -235,13 +258,20 @@ def test_api_pull_store_and_export(api):
     assert lst[0]["id"] == rep["id"] and lst[0]["source"] == "sap_pull"
     wb = tc.get(f"/api/health/reports/{rep['id']}/workbook")
     assert wb.status_code == 200
-    assert "attachment" in wb.headers["content-disposition"]
-    assert wb.headers["content-type"].startswith("application/vnd.ms-excel")
+    assert re.search(r'attachment; filename="[^"]+\.xlsx"', wb.headers["content-disposition"])
+    assert wb.headers["content-type"] == XLSX_MIME
+    assert_valid_xlsx(wb.content)
     # the export re-imports to the same verdicts
-    again = analyze(read_workbook(wb.content, "x.XLS"), "x.XLS")
+    again = analyze(read_workbook(wb.content, "x.xlsx"), "x.xlsx")
     assert [c.sap_status for c in again.checks] == [c["sap_status"] for c in rep["checks"]]
+    assert [c.triage for c in again.checks] == [c["triage"] for c in rep["checks"]]
+    # the original SpreadsheetML is still available, and loads in Excel
+    raw = tc.get(f"/api/health/reports/{rep['id']}/workbook?format=xls")
+    assert raw.headers["content-disposition"].endswith('.XLS"') and raw.content[:5] == b"<?xml"
+    assert excel_problems(raw.content) == []
+    assert tc.get(f"/api/health/reports/{rep['id']}/workbook?format=pdf").status_code == 400
     # no credential anywhere
-    blobs = [r.content, wb.content] + [p.read_bytes() for p in (tmp / "health").iterdir()]
+    blobs = [r.content, xlsx_text(wb.content), raw.content] + [p.read_bytes() for p in (tmp / "health").iterdir()]
     for b in blobs:
         assert PASSWORD.encode() not in b and b"Authorization" not in b
     assert tc.delete(f"/api/health/reports/{rep['id']}").status_code == 204
@@ -265,7 +295,10 @@ def test_imported_file_is_exportable_too(api):
     raw = build().encode()
     rep = tc.post("/api/health/reports", files={"file": ("ahc.xls", raw, "application/vnd.ms-excel")}).json()
     assert rep["source"] == "import" and rep["has_workbook"] is True
-    assert tc.get(f"/api/health/reports/{rep['id']}/workbook").content == raw
+    x = tc.get(f"/api/health/reports/{rep['id']}/workbook")
+    assert x.headers["content-type"] == XLSX_MIME and x.headers["content-disposition"].endswith('ahc.xlsx"')
+    assert_valid_xlsx(x.content, sheets=list(read_workbook(raw, "ahc.xls")))
+    assert tc.get(f"/api/health/reports/{rep['id']}/workbook?format=xls").content == raw
 
 
 # ── optional: against a real SAP export ──────────────────────────────────
@@ -449,3 +482,55 @@ def test_sapcontrol_only_read_functions():
             sc.run("01", fn, *args)
     with pytest.raises(ValueError):
         sc.run("1 -function Stop", "GetAccessPointList")
+
+
+# ── Export: Excel must open every workbook (the .XLS bug) ────────────────
+def test_generated_spreadsheetml_obeys_excel_load_rules(pulled):
+    """Excel refuses SpreadsheetML whose tabs use more columns than
+    ExpandedColumnCount declares (was: SOST, DB02_Alerts, DB02_Memory)."""
+    assert excel_problems(pulled[0]) == []
+
+
+def test_writer_drops_xml_illegal_characters():
+    from ahc.writer import Block, Verdict, write_workbook
+    from ahc.collect import SHEET_OF_MONITOR
+    data = write_workbook("T", [Verdict(True, "OK")] * 33,
+                          {"SM21": [Block(LAYOUT["sheets"][2]["tables"][0], [["a\x00b\x1bc", "x" * 40000]])]})
+    assert excel_problems(data) == []
+    assert len(SHEET_OF_MONITOR) == 33
+
+
+def test_xlsx_keeps_ahc_formatting(pulled):
+    wb = assert_valid_xlsx(spreadsheetml_to_xlsx(pulled[0]))
+    mon = wb["Monitors"]
+    assert "A1:H1" in {str(r) for r in mon.merged_cells.ranges}
+    assert mon["A1"].fill.fgColor.rgb == "FF000000" and mon["A1"].font.bold
+    assert mon["A2"].value == "Monitoring Task" and mon["A2"].fill.fgColor.rgb not in (None, "00000000")
+    oks = [mon.cell(r, 5) for r in range(3, 36) if mon.cell(r, 5).value == "X"]
+    assert oks and all(c.fill.fgColor.rgb == oks[0].fill.fgColor.rgb for c in oks)
+    assert mon.column_dimensions["C"].width > 10
+    sl = wb["SLICENSE"]
+    assert sl.cell(5, 1).value == "Status" and sl.cell(5, 1).border.top.style == "thin"
+    assert sl.cell(7, 4).value == "Maintenance_HDB" and sl.cell(7, 11).value == "Expired"
+
+
+def test_xlsx_round_trip_same_verdicts(pulled):
+    x = spreadsheetml_to_xlsx(pulled[0])
+    a, b = pulled[2], analyze(read_workbook(x, "x.xlsx"), "x.xlsx")
+    assert [(c.sheet, c.sap_status, c.triage) for c in a.checks] == [(c.sheet, c.sap_status, c.triage) for c in b.checks]
+
+
+def test_xlsx_input_is_returned_unchanged(pulled):
+    x = spreadsheetml_to_xlsx(pulled[0])
+    assert spreadsheetml_to_xlsx(x) == x
+
+
+@pytest.mark.skipif(not os.environ.get("HEALTH_REAL_AHC"), reason="real export not provided")
+def test_real_sap_export_converts_to_valid_xlsx():
+    """SAP's own export contains XML-illegal control characters; Excel can
+    refuse it as .XLS, the .xlsx conversion must still open."""
+    real = Path(os.environ["HEALTH_REAL_AHC"]).read_bytes()
+    x = spreadsheetml_to_xlsx(real)
+    assert_valid_xlsx(x)
+    a, b = analyze(read_workbook(real, "r.XLS"), "r"), analyze(read_workbook(x, "r.xlsx"), "r")
+    assert [(c.sap_status, c.triage) for c in a.checks] == [(c.sap_status, c.triage) for c in b.checks]

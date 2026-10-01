@@ -433,6 +433,17 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
   end < today → Expired; hw key ≠ active → "Valid (inactive Hardware Key)";
   else Valid. Verified field-by-field against the SLICENSE screen on F4H.
   Without HANA access it falls back to the FM's rows.
+- **Export = real .xlsx (bug fix 2026-10-01).** The .XLS export would not
+  open in Excel: three generated tabs (SOST, DB02_Alerts, DB02_Memory) used
+  more columns than their ss:ExpandedColumnCount, which makes Excel refuse
+  the whole SpreadsheetML file; SAP's own exports also carry XML-illegal
+  control characters. Fixes: writer derives ExpandedColumnCount/RowCount
+  from what it wrote and strips control chars (`ahc/layout_check.
+  excel_problems()` checks Excel's load rules in tests); GET
+  /api/health/reports/{id}/workbook now returns .xlsx by default
+  (health/xlsx_export.py, openpyxl: values, fonts, fills, borders,
+  alignment/wrap, merges, column widths, row heights; works for SAP's own
+  files too); `?format=xls` still returns the stored original.
 - **SICK via a background job (the one non-read):** transaction SICK =
   report RSICC000. ahc/xbp.py runs it through SAP's remote-enabled XBP
   interface (BAPI_XMI_LOGON, BAPI_XBP_JOB_OPEN / ADD_ABAP_STEP / CLOSE /
