@@ -23,7 +23,8 @@ import json
 import re
 import sys
 import xml.etree.ElementTree as ET
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
 USER, PASSWORD = "MONITOR", "secret"
@@ -124,7 +125,16 @@ def tables() -> dict:
         "T000": (["MANDT", "MTEXT", "ORT01", "MWAER", "CCCATEGORY", "CHANGEDATE"],
                  [["000", "SAP AG", "Walldorf", "EUR", "S", "20250101"], ["100", "Quality", "Pune", "INR", "T", d(y)]]),
         "TPFBA": (["BANAME", "SYSNAME", "TYPE", "TXT"], [["DUMMY", "QAS", "T", "Self-Configured Operation Mode"]]),
-        "RFCDES": (["RFCDEST", "RFCTYPE"], [["QASCLNT100", "3"], ["NONE", "3"]]),
+        "RFCDES": (["RFCDEST", "RFCTYPE", "RFCOPTIONS"], [
+            ["QASCLNT100", "3", "H=qas,S=00,M=100,U=RFCUSER,L=E,v=%_PWD,"],
+            ["PRDCLNT100", "3", "H=prd,S=00,M=100,U=RFCUSER,L=E,v=%_PWD,"],     # logon fails
+            ["DEVCLNT100", "3", "H=dev,S=00,M=100,U=RFCUSER,L=E,"],             # host down
+            ["ZOMBIE_TCP", "T", "H=legacy,N=prog,"],                            # never answers
+            ["Z_SKIPPED", "T", "H=x,"],
+            ["NONE", "I", ""]]),
+        "RFCDOC": (["RFCLANG", "RFCDEST", "RFCDOC1"], [["E", "QASCLNT100", "QAS client 100"]]),
+        "RFCATTRIB": (["RFCDEST", "CUNAME", "CUDATE", "MUNAME", "MUDATE"],
+                      [["QASCLNT100", "BASIS", "20240101", "GIRI", "20260915"]]),
     }
 
 
@@ -261,6 +271,21 @@ def handle(fm, fn, body) -> str:
         return resp("/SDF/SLIC_READ_LICENSES", "<COUNT>1</COUNT><CUSTKEY>J1</CUSTKEY><LICENSES>" + items([
             {"SYSTEMID": "QAS", "HWKEY": "J1", "SWPRODUCT": "NetWeaver_HDB", "END_DATE": "99991231", "VALIDITY": "Valid"}])
             + "</LICENSES>")
+    if fm == "DEST_CHECK_CONNECTION":
+        name = re.search(r"<NAME>(.*?)</NAME>", body).group(1)
+        if name == "NONE":
+            return fault("CHECK_NOT_POSSIBLE")
+        if name == "ZOMBIE_TCP":
+            time.sleep(8)                       # longer than the test's AHC_RFC_TIMEOUT
+        res, err, auth, aerr = {
+            "QASCLNT100": ("", "", "", ""),
+            "PRDCLNT100": ("", "", "E", "Name or password is incorrect (repeat logon)"),
+            "DEVCLNT100": ("E", "Connection to host dev, service sapgw00 failed: NIEHOST_UNKNOWN", "N", ""),
+        }.get(name, ("", "", "N", ""))
+        return resp(fm, f"<AUTHORIZATION_ERROR_TEXT>{aerr}</AUTHORIZATION_ERROR_TEXT>"
+                        f"<AUTHORIZATION_TEST_RESULT>{auth}</AUTHORIZATION_TEST_RESULT>"
+                        f"<CONNECTION_ERROR_TEXT>{err}</CONNECTION_ERROR_TEXT><CONNECTION_PROPERTIES/>"
+                        f"<CONNECTION_TEST_RESULT>{res}</CONNECTION_TEST_RESULT>")
     if fm.startswith("BAPI_XMI_") or fm.startswith("BAPI_XBP_"):
         return xbp(fm, body)
     if fm == "SXPG_COMMAND_EXECUTE":
@@ -505,4 +530,5 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    ThreadingHTTPServer.daemon_threads = True          # a hanging RFC test must not block other calls
+    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()

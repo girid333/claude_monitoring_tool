@@ -32,6 +32,8 @@ from cryptography.fernet import Fernet
 
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
+os.environ["AHC_RFC_TIMEOUT"] = "1.5"        # the fake's zombie destination sleeps 8 s
+os.environ["AHC_RFC_SKIP"] = "Z_SKIP*"
 for k in ("NO_PROXY", "no_proxy"):
     os.environ[k] = "127.0.0.1,localhost"
 
@@ -179,17 +181,17 @@ def test_windows_use_sap_clock_not_container_clock(pulled):
 
 def test_not_collected_checks_are_no_data_never_ok(pulled):
     c = by_sheet(pulled[2])
-    for s in ("RFC_Con", "SM04"):
+    for s in ("SM04",):
         assert c[s].sap_status == "unknown" and c[s].triage == "no_data", (s, c[s].triage)
-    assert pulled[1]["not_collected"] == 2
+    assert pulled[1]["not_collected"] == 1
 
 
 def test_only_read_only_modules_called(pulled):
     """Everything is a read, except the XBP modules that run SICK's report as
     one background job — and that job is deleted again."""
-    from ahc.sap import JOB_FMS
+    from ahc.sap import JOB_FMS, TEST_FMS
     calls = pulled[3]
-    allowed = {f.replace("/", "_-") for f in READ_ONLY_FMS}
+    allowed = {f.replace("/", "_-") for f in READ_ONLY_FMS} | TEST_FMS
     assert set(calls) - set(JOB_FMS) <= allowed, set(calls) - allowed - set(JOB_FMS)
     assert calls.count("BAPI_XBP_JOB_OPEN") == 1 and calls.count("BAPI_XBP_JOB_DELETE") == 1
     assert "_-SDF_-SLIC_READ_LICENSES" in calls                     # namespaced FM encoded
@@ -209,7 +211,7 @@ def test_hana_tabs_without_sm69_command_say_why(server):
     for s in ("DB12", "DB02_Alerts", "DB02_Log", "DB02_Memory", "DB01"):
         assert rep[s].triage == "no_data" and rep[s].sap_status == "unknown", s
     assert any("ZAHC_HDBSQL" in n for n in meta["notes"]) or "ZAHC_HDBSQL" in data.decode("utf-8", "ignore")
-    assert meta["not_collected"] == 7
+    assert meta["not_collected"] == 6
 
 
 def test_wrong_password_raises_not_half_report(server):
@@ -534,3 +536,58 @@ def test_real_sap_export_converts_to_valid_xlsx():
     assert_valid_xlsx(x)
     a, b = analyze(read_workbook(real, "r.XLS"), "r"), analyze(read_workbook(x, "r.xlsx"), "r")
     assert [(c.sap_status, c.triage) for c in a.checks] == [(c.sap_status, c.triage) for c in b.checks]
+
+
+# ── RFC_Con: SM59 connection test of every destination ───────────────────
+def test_rfc_con_tests_every_destination_and_aborts_zombies(pulled):
+    t = read_workbook(pulled[0], "pull.XLS")["RFC_Con"].tables[0]
+    rows = {r[1]: r for r in t.rows}
+    assert set(rows) == {"QASCLNT100", "PRDCLNT100", "DEVCLNT100", "ZOMBIE_TCP", "NONE"}   # Z_SKIPPED filtered
+    q = rows["QASCLNT100"]
+    assert q[0] == "ABAP Connection" and q[2] == "QAS client 100" and q[3] == "GIRI" and q[4] == "15.09.2026"
+    assert (q[5], q[6], q[7], q[9], q[10], q[11]) == ("qas", "00", "100", "RFCUSER", "E", "Saved")
+    assert (q[16], q[17]) == ("Connection OK", "Logon successful")
+    assert rows["PRDCLNT100"][17].startswith("Logon failed: Name or password")
+    assert "NIEHOST_UNKNOWN" in rows["DEVCLNT100"][16]
+    assert "no response within 1.5 s" in rows["ZOMBIE_TCP"][16]
+    assert rows["NONE"][16] == "Test not possible for this connection type"
+    assert [r[1] for r in t.rows][:3] == sorted(["PRDCLNT100", "DEVCLNT100", "ZOMBIE_TCP"],
+                                                key=lambda n: ("3" if n != "ZOMBIE_TCP" else "T", n))  # failures first
+    c = by_sheet(pulled[2])["RFC_Con"]
+    assert c.sap_status == "not_ok"
+    for name in ("PRDCLNT100", "DEVCLNT100", "ZOMBIE_TCP"):
+        assert name in c.sap_evidence
+    assert "1 OK, 3 failed, 1 not testable" in c.sap_evidence
+
+
+def test_rfc_con_zombie_does_not_stall_the_pull(server, monkeypatch):
+    """Several hanging destinations are tested in parallel, each abandoned
+    after the timeout: the check takes about one timeout, not one per zombie."""
+    import datetime as dt
+    import time as _t
+    from ahc.collect import Ctx, c_rfc_con
+    from ahc.sap import Sap
+    monkeypatch.setenv("AHC_RFC_TIMEOUT", "1")
+    monkeypatch.setenv("AHC_RFC_SKIP", "")
+    c = client()
+    try:
+        x = Ctx(sap=Sap(c), sid="QAS", client="100", now=dt.datetime.now())
+        t0 = _t.time()
+        blocks, v = c_rfc_con(x)
+        took = _t.time() - t0
+    finally:
+        c.close()
+    assert took < 4, took
+    assert v.ok is False and "ZOMBIE_TCP" in v.evidence
+    assert len(blocks[0].rows) == 6
+
+
+def test_soap_call_timeout_is_reported_as_timeout(server):
+    c = client()
+    try:
+        with pytest.raises(RfcSoapError) as e:
+            c.call("DEST_CHECK_CONNECTION", _timeout_s=0.5, NAME="ZOMBIE_TCP")
+        assert e.value.kind == "timeout" and "0.5 s" in e.value.message
+        assert c.call("DEST_CHECK_CONNECTION", NAME="QASCLNT100")["CONNECTION_TEST_RESULT"] == ""
+    finally:
+        c.close()

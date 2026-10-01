@@ -49,7 +49,7 @@ class RfcSoapError(RuntimeError):
                  detail: str = "", function: str = "") -> None:
         super().__init__(message)
         self.message = message
-        self.kind = kind          # auth | not_enabled | fault | abap_exception | transport | parse
+        self.kind = kind          # auth | not_enabled | fault | abap_exception | transport | parse | timeout
         self.detail = detail
         self.function = function
 
@@ -221,10 +221,11 @@ class RfcSoapClient:
         return cls(RfcTarget(soap_url=derive_soap_url(webgui_url), username=username,
                               password=password, client=client), **kw)
 
-    def call(self, function: str, **params: Any) -> dict[str, Any]:
-        return self.call_raw(function, **params)[0]
+    def call(self, function: str, *, _timeout_s: Optional[float] = None, **params: Any) -> dict[str, Any]:
+        return self.call_raw(function, _timeout_s=_timeout_s, **params)[0]
 
-    def call_raw(self, function: str, **params: Any) -> tuple[dict[str, Any], bytes]:
+    def call_raw(self, function: str, *, _timeout_s: Optional[float] = None,
+                 **params: Any) -> tuple[dict[str, Any], bytes]:
         """Same as call(), but also returns the raw response body.
 
         This exists to end guesswork. Export/table parameter names vary by
@@ -232,6 +233,10 @@ class RfcSoapClient:
         "succeeded" with zero rows on Giri's live system. Being able to see
         what SAP actually sent back turns that into a five-second fix — the
         same role the flow step viewer (D-041) played for the WebGUI engine.
+
+        `_timeout_s` overrides the client's timeout for this one call (D-051:
+        an RFC connection test against a hanging destination is abandoned
+        after 30 s). SAP parameter names are upper case, so it cannot clash.
         """
         body = build_envelope(function, params)
         url = self.target.soap_url
@@ -242,7 +247,13 @@ class RfcSoapClient:
                 params={"sap-client": self.target.client},
                 headers={"Content-Type": 'text/xml; charset="utf-8"',
                          "SOAPAction": '""'},
+                **({"timeout": _timeout_s} if _timeout_s is not None else {}),
             )
+        except httpx.TimeoutException as exc:
+            raise RfcSoapError(
+                f"{function}: no response from SAP within "
+                f"{_timeout_s if _timeout_s is not None else self.timeout_s:g} s — call abandoned",
+                kind="timeout", function=function) from exc
         except httpx.RequestError as exc:
             raise RfcSoapError(
                 f"{function}: could not reach the SAP SOAP RFC endpoint at {url} ({exc}). "

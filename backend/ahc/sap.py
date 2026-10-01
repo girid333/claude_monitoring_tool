@@ -32,6 +32,10 @@ READ_ONLY_FMS = {
 }
 
 
+# SM59's connection test: opens a connection to the destination, changes
+# nothing. Used by the RFC_Con check with a per-call deadline.
+TEST_FMS = {"DEST_CHECK_CONNECTION"}
+
 # Not read-only: they create, run and delete ONE background job for an
 # allowlisted report (ahc/xbp.py ALLOWED_REPORTS). AHC_NO_JOBS=1 disables them.
 JOB_FMS = {
@@ -67,10 +71,12 @@ class Sap:
         self.c = client
         self.calls: list[str] = []
 
-    def call(self, fm: str, **params: Any) -> dict:
-        if fm not in READ_ONLY_FMS and fm not in JOB_FMS:
+    def call(self, fm: str, _timeout_s: Optional[float] = None, **params: Any) -> dict:
+        if fm not in READ_ONLY_FMS and fm not in JOB_FMS and fm not in TEST_FMS:
             raise RfcSoapError(f"{fm} is not on the read-only list", kind="refused", function=fm)
         self.calls.append(fm)
+        if _timeout_s is not None:
+            return self.c.call(fm.replace("/", "_-"), _timeout_s=_timeout_s, **params)
         return self.c.call(fm.replace("/", "_-"), **params)
 
     def fields(self, table: str) -> list[str]:

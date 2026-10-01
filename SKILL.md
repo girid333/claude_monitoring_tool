@@ -433,6 +433,23 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
   end < today → Expired; hw key ≠ active → "Valid (inactive Hardware Key)";
   else Valid. Verified field-by-field against the SLICENSE screen on F4H.
   Without HANA access it falls back to the FM's rows.
+- **RFC_Con = SM59 connection test of every destination (2026-10-02).**
+  DEST_CHECK_CONNECTION (remote-enabled; it is SM59's own "Connection
+  Test", result domain: '' successful / E error / N not possible; exception
+  CHECK_NOT_POSSIBLE for types I/W/X/@) per RFCDES entry, plus RFCDOC
+  (description), RFCATTRIB (changed by/on) and RFCOPTIONS (H host, S
+  sysnr, I port, M client, U user, L language, v=%_PWD password saved).
+  Each test has its own deadline (AHC_RFC_TIMEOUT, default 30 s; the SOAP
+  client gained a per-call `_timeout_s`, timeouts raise kind="timeout"); a
+  hanging "zombie" destination is abandoned and marked failed. Tests run
+  AHC_RFC_PARALLEL (default 3) at a time, so zombies don't add up — but
+  each still holds a dialog WP in SAP until SAP's own RFC timeout. Failed
+  rows first (Connection Test red), OK green; not-testable listed, not
+  counted. AHC_RFC_SKIP = comma-separated fnmatch patterns to exclude
+  (the role of the customer's ZCAS_AHC_FILTER table). Any failure → Not
+  OK. Live F4H: 54 destinations in 30.5 s — 17 OK, 27 failed (mostly
+  SAPGUI-bound TCP/IP destinations that fail in SM59 too), 10 not testable;
+  SAPJ2EE hung and was cut at 30 s.
 - **Export = real .xlsx (bug fix 2026-10-01).** The .XLS export would not
   open in Excel: three generated tabs (SOST, DB02_Alerts, DB02_Memory) used
   more columns than their ss:ExpandedColumnCount, which makes Excel refuse
@@ -469,8 +486,8 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
   could append `-function Stop` — restrict S_LOG_COM to the monitoring
   user or point SM69 at a wrapper script that passes only those three
   functions. Verified on F4H: 8101 HTTP ms/server_port_0 Opened 20/60.
-- **Not collectable over RFC → "Not collected", never OK:** RFC_Con
-  connection tests (RSRFCCHK), SM04 session priority. Analyser
+- **Not collectable over RFC → "Not collected", never OK:** SM04 session
+  priority. Analyser
   rule: SAP status unknown + no data → triage no_data, not ok.
 - **Gotchas found on F4H:** time windows use SAP's clock
   (UTC + RFC_SYSTEM_INFO.RFCTZONE), not the container's (5.5 h skew emptied

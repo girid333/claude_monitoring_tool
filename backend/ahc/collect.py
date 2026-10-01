@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import os
 import re
 import traceback
 from dataclasses import dataclass, field
@@ -790,12 +791,94 @@ def c_st03n(x: Ctx) -> Result:
     return [Block(cols("ST03N"), rows, f"Workload in System {x.sid}", subtitle, subtitle_merge=8)], v
 
 
+_RFC_TYPE = {"3": "ABAP Connection", "T": "TCP/IP Connection", "G": "HTTP Connection to External Server",
+             "H": "HTTP Connection to ABAP System", "I": "Internal Connection", "L": "Logical Connection",
+             "W": "WebSocket RFC Connection", "X": "Connection via ABAP Driver", "2": "R/2 Connection"}
+
+
+def _rfc_opts(s: str) -> dict:
+    """RFCDES.RFCOPTIONS: comma-separated key=value (H host, S system no.,
+    I port, M client, U user, L language, v=%_PWD password stored)."""
+    out = {}
+    for part in (s or "").split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out.setdefault(k, v.strip())
+    return out
+
+
+def _rfc_test(x: Ctx, dest: str, timeout_s: float) -> tuple[str, str, str]:
+    """(state ok|failed|untestable, connection text, logon text)."""
+    try:
+        r = x.sap.call("DEST_CHECK_CONNECTION", _timeout_s=timeout_s, NAME=dest)
+    except RfcSoapError as exc:
+        if exc.kind == "timeout":
+            return "failed", f"Failed: no response within {timeout_s:g} s — test aborted (hanging connection)", ""
+        if "CHECK_NOT_POSSIBLE" in exc.message:
+            return "untestable", "Test not possible for this connection type", ""
+        return "failed", f"Failed: {exc.message[:150]}", ""
+    res = (r.get("CONNECTION_TEST_RESULT") or "").strip()
+    err = " ".join((r.get("CONNECTION_ERROR_TEXT") or "").split())
+    auth, aerr = (r.get("AUTHORIZATION_TEST_RESULT") or "").strip(), " ".join((r.get("AUTHORIZATION_ERROR_TEXT") or "").split())
+    if res == "E":
+        return "failed", f"Failed: {err or 'connection error'}", ""
+    if res == "N":
+        return "untestable", "Test not possible for this connection type", ""
+    logon = {"": "Logon successful", "N": "Logon test not possible"}.get(auth, f"Logon failed: {aerr or auth}")
+    return ("failed" if auth == "E" else "ok"), "Connection OK", logon
+
+
 def c_rfc_con(x: Ctx) -> Result:
-    n = len(x.sap.read("RFCDES", ["RFCDEST"], "RFCTYPE EQ '3'"))
-    return ([Block(cols("RFC_Con"), [], "RFC_Con", "Overview of RFC Connections with Logon Data and Connection Test",
-                   subtitle_merge=8)],
-            Verdict(None, f"{n} ABAP (type 3) RFC destination(s) configured; connection tests "
-                          "(report RSRFCCHK) cannot be executed over SOAP RFC"))
+    """SM59 connection test for every destination (DEST_CHECK_CONNECTION is
+    SM59's own test). Each test gets AHC_RFC_TIMEOUT seconds (default 30);
+    a hanging ("zombie") destination is abandoned then and counted as failed.
+    Tests run AHC_RFC_PARALLEL at a time (default 3) so zombies don't add
+    up; each one occupies a dialog work process in SAP until SAP's own RFC
+    timeout ends it. AHC_RFC_SKIP: comma-separated name patterns to leave out."""
+    import fnmatch
+    from concurrent.futures import ThreadPoolExecutor
+    timeout_s = float(os.environ.get("AHC_RFC_TIMEOUT", "30") or 30)
+    workers = max(1, min(8, int(os.environ.get("AHC_RFC_PARALLEL", "3") or 3)))
+    skip = [p.strip() for p in os.environ.get("AHC_RFC_SKIP", "").split(",") if p.strip()]
+    title = "RFC_Con"
+    sub = f"Overview of RFC Connections with Logon Data and Connection Test in {x.sc()}"
+    dests = [d for d in x.sap.read("RFCDES", ["RFCDEST", "RFCTYPE", "RFCOPTIONS"])
+             if not any(fnmatch.fnmatchcase(d["RFCDEST"], p) for p in skip)]
+    docs = {d["RFCDEST"]: d.get("RFCDOC1", "") for d in x.sap.read("RFCDOC", ["RFCDEST", "RFCDOC1"], "RFCLANG EQ 'E'")}
+    attrib = {d["RFCDEST"]: d for d in x.sap.read("RFCATTRIB", ["RFCDEST", "CUNAME", "CUDATE", "MUNAME", "MUDATE"])}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {d["RFCDEST"]: pool.submit(_rfc_test, x, d["RFCDEST"], timeout_s) for d in dests}
+        results = {}
+        for name, f in futs.items():
+            try:
+                results[name] = f.result(timeout=timeout_s + 15)
+            except Exception as exc:  # noqa: BLE001  (belt and braces: never let one destination stall the pull)
+                results[name] = ("failed", f"Failed: {type(exc).__name__}", "")
+    rows, styles, failed, ok, untestable = [], {}, [], 0, 0
+    order = {"failed": 0, "ok": 1, "untestable": 2}
+    for d in sorted(dests, key=lambda d: (order[results[d["RFCDEST"]][0]], d["RFCTYPE"], d["RFCDEST"])):
+        name, o = d["RFCDEST"], _rfc_opts(d.get("RFCOPTIONS", ""))
+        state, conn, logon = results[name]
+        at = attrib.get(name, {})
+        who, when = (at.get("MUNAME") or at.get("CUNAME") or ""), d8(at.get("MUDATE") or at.get("CUDATE") or "")
+        i = len(rows)
+        rows.append([_RFC_TYPE.get(d["RFCTYPE"], d["RFCTYPE"]), name, docs.get(name, ""), who,
+                     when.strftime("%d.%m.%Y") if when else "", o.get("H", ""), o.get("S") or o.get("I", ""),
+                     o.get("M", ""), "", o.get("U", ""), o.get("L", ""),
+                     "Saved" if o.get("v") == "%_PWD" else "", "", "", "", "", conn, logon])
+        if state == "failed":
+            failed.append(name)
+            styles[(i, 16)] = RED
+        elif state == "ok":
+            ok += 1
+            styles[(i, 16)] = GREEN
+        else:
+            untestable += 1
+    summary = f"{ok} OK, {len(failed)} failed, {untestable} not testable"
+    v = Verdict(not failed, f"All {ok} testable RFC connection(s) OK ({untestable} not testable)" if not failed else
+                f"{len(failed)} RFC connection(s) failed: " + ", ".join(failed[:8])
+                + (" …" if len(failed) > 8 else "") + f". {summary}. Check RFC_Con tab")
+    return [Block(cols("RFC_Con"), rows, title, f"{sub} — {summary}", subtitle_merge=8, styles=styles)], v
 
 
 BOX = "-" * 74          # width of SAP's system-check box (RSICC000 list)
