@@ -119,6 +119,11 @@ app.include_router(datarun_router)
 from health.router import router as health_router  # noqa: E402
 app.include_router(health_router)
 
+# D-051: direct pull of the Automated Health Check over SOAP RFC
+# (/api/health/pull). Own module (backend/ahc/), one include line.
+from ahc.api import router as ahc_router  # noqa: E402
+app.include_router(ahc_router)
+
 store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}
 

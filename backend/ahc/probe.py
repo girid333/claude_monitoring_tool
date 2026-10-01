@@ -536,6 +536,69 @@ async def webgui_capture(sid: str, tcodes: list[str], registry_path: str) -> dic
     return out
 
 
+# ── HANA SQL through the ABAP system (feasibility only) ───────────────────
+
+# Ways an ABAP system can run SQL against its own HANA DB on our behalf.
+# NOTHING here is executed: the probe only checks whether each path exists.
+HANA_VIA_RFC_FMS = {
+    "SXPG_COMMAND_EXECUTE": "runs an SM69 external command (e.g. an hdbsql wrapper) — v1 already uses it for df -h",
+    "SXPG_COMMAND_LIST_GET": "lists SM69 external commands",
+    "RFC_ABAP_INSTALL_AND_RUN": "generic ABAP execution — never acceptable for monitoring; listed only so its presence is known",
+}
+HANA_VIA_RFC_PATTERNS = ["/SDF/HDB%", "%HDB%SQL%", "%SQL%EXEC%", "%EXEC%SQL%", "DB6%SQL%",
+                         "%DBACOCKPIT%", "SHDB%", "/SDF/%HANA%"]
+HANA_VIEWS = ["M_BACKUP_CATALOG", "M_HOST_RESOURCE_UTILIZATION", "M_DISKS", "M_BLOCKED_TRANSACTIONS",
+              "M_SYSTEM_AVAILABILITY", "STATISTICS_CURRENT_ALERTS"]
+
+
+def hana_via_rfc(rfc: "RfcProber") -> list[dict]:
+    """Can the ABAP system run HANA SQL for us over SOAP RFC, the way DBACOCKPIT's
+    SQL editor does locally? Checks (read-only): remote-enabled modules that
+    could, SM69 external commands wrapping hdbsql, and DDIC objects that would
+    let RFC_READ_TABLE read a HANA monitoring view directly."""
+    out: list[dict] = []
+
+    def add(path, status, detail):
+        out.append({"path": path, "status": status, "detail": _clip(detail, 260)})
+
+    names = ", ".join(f"'{n}'" for n in HANA_VIA_RFC_FMS)
+    try:
+        rows = rfc._read("TFDIR", ["FUNCNAME", "FMODE"], f"FUNCNAME IN ({names})", rowcount=10)
+        found = {r["FUNCNAME"]: r.get("FMODE") for r in rows}
+        for fm, why in HANA_VIA_RFC_FMS.items():
+            st = "remote-enabled" if found.get(fm) == "R" else ("exists, not remote" if fm in found else "absent")
+            add(f"FM {fm}", st, why)
+    except RfcSoapError as exc:
+        add("TFDIR", "failed", exc.message)
+
+    try:
+        cmds = rfc._read("SXPGCOSTAB", ["NAME", "OPSYSTEM", "OPCOMMAND", "PARAMETERS"], rowcount=500)
+        hdb = [c for c in cmds if "hdbsql" in (c.get("OPCOMMAND", "") + c.get("PARAMETERS", "")).lower()]
+        add("SM69 commands (SXPGCOSTAB)", "ok" if hdb else "none matching",
+            (f"{len(hdb)} hdbsql command(s): " + "; ".join(
+                f"{c['NAME']} = {c['OPCOMMAND']} {c.get('PARAMETERS', '')}" for c in hdb[:5]))
+            if hdb else f"{len(cmds)} customer commands read, none call hdbsql")
+    except RfcSoapError as exc:
+        add("SM69 commands (SXPGCOSTAB)", "failed", exc.message)
+
+    try:
+        tabs = ", ".join(f"'{v}'" for v in HANA_VIEWS)
+        rows = rfc._read("DD02L", ["TABNAME", "TABCLASS"], f"TABNAME IN ({tabs})", rowcount=20)
+        add("DDIC views over HANA monitoring views (DD02L)", "ok" if rows else "none",
+            ", ".join(f"{r['TABNAME']} ({r['TABCLASS']})" for r in rows)
+            or "none of " + ", ".join(HANA_VIEWS) + " is in the DDIC, so RFC_READ_TABLE cannot read them")
+    except RfcSoapError as exc:
+        add("DDIC (DD02L)", "failed", exc.message)
+
+    try:
+        found = rfc.discover(HANA_VIA_RFC_PATTERNS)
+        add("Discovered remote-enabled modules (listed, NOT called)", "ok" if found else "none",
+            ", ".join(found[:25]) or "no module matched " + ", ".join(HANA_VIA_RFC_PATTERNS))
+    except RfcSoapError as exc:
+        add("Discovery", "failed", exc.message)
+    return out
+
+
 # ── Orchestration ─────────────────────────────────────────────────────────
 
 STRUCTURED = ("rfc_table", "rfc_fm", "hana_sql")
@@ -598,7 +661,8 @@ def probe(specs: list[CheckSpec], rfc: Optional[RfcProber], hana: Optional[HanaP
     return results
 
 
-def to_markdown(results: list[ProbeResult], sid: str, header: str = "") -> str:
+def to_markdown(results: list[ProbeResult], sid: str, header: str = "",
+                hana_rfc: Optional[list[dict]] = None) -> str:
     ok = sum(r.confirmed for r in results)
     img = sum(r.confirmed and r.chosen_kind == "webgui" for r in results)
     lines = [f"# AHC data-source probe — {sid}", "",
@@ -612,6 +676,11 @@ def to_markdown(results: list[ProbeResult], sid: str, header: str = "") -> str:
         esc = lambda s: str(s).replace("|", "\\|")  # noqa: E731
         lines.append(f"| {i} | {esc(r.task)} | {esc(r.tcode)} | {esc(r.chosen)} | "
                      f"{esc(r.sample)} | {('yes (image only)' if r.chosen_kind == 'webgui' else 'yes') if r.confirmed else 'no'} |")
+    if hana_rfc:
+        lines += ["", "## HANA SQL through the ABAP system (feasibility, nothing executed)", "",
+                  "| Path | Status | Detail |", "|---|---|---|"]
+        for h in hana_rfc:
+            lines.append(f"| {h['path']} | {h['status']} | {str(h['detail']).replace('|', '/')} |")
     lines += ["", "## Every attempt", ""]
     for r in results:
         lines.append(f"### {r.task} ({r.tcode})" + (f" — {r.note}" if r.note else ""))
@@ -638,6 +707,23 @@ def _rfc_client_for(sid: str, registry_path: str) -> tuple[RfcSoapClient, str]:
             entry.client)
 
 
+def _rfc_client_direct(url: str, sap_client: str) -> tuple[RfcSoapClient, str]:
+    """No registry: WebGUI/ICM URL from the command line, credentials ONLY from
+    the environment (SAP_PROBE_USER / SAP_PROBE_PASSWORD, D-018)."""
+    user, pwd = os.environ.get("SAP_PROBE_USER", ""), os.environ.get("SAP_PROBE_PASSWORD", "")
+    if not (user and pwd):
+        raise SystemExit("--url needs SAP_PROBE_USER and SAP_PROBE_PASSWORD in the environment.")
+    client = RfcSoapClient.from_system(url, client=sap_client, username=user, password=pwd)
+    if os.environ.get("AHC_PROBE_ENV_PROXY"):
+        # The app's client ignores proxy env vars on purpose (D-045). A probe run
+        # from a workstation that can only reach SAP through a proxy opts in here.
+        import httpx
+        client._http.close()
+        client._http = httpx.Client(auth=(user, pwd), timeout=client.timeout_s,
+                                    follow_redirects=True, trust_env=True)
+    return client, sap_client
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--sid", required=True)
@@ -647,10 +733,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--no-discover", action="store_true", help="skip the TFDIR discovery search")
     ap.add_argument("--registry", default=os.environ.get("SYSTEMS_PATH", "systems.json"))
     ap.add_argument("--out", type=Path, default=Path("ahc_probe"))
+    ap.add_argument("--url", help="WebGUI URL; bypasses the registry (creds from SAP_PROBE_USER/_PASSWORD)")
+    ap.add_argument("--client", default="100", help="SAP client for --url")
     a = ap.parse_args(argv)
 
     specs = checks_from_sample(a.sample) if a.sample else list(CATALOGUE.values())
-    client, sap_client = _rfc_client_for(a.sid, a.registry)
+    client, sap_client = (_rfc_client_direct(a.url, a.client) if a.url
+                          else _rfc_client_for(a.sid, a.registry))
     rfc = RfcProber(client, a.sid, sap_client)
     try:
         info = client.ping().get("RFCSI_EXPORT") or {}
@@ -663,13 +752,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     webgui = (lambda tcodes: asyncio.run(webgui_capture(a.sid, tcodes, a.registry))) \
         if a.webgui else None
     results = probe(specs, rfc, hana, webgui, discover=not a.no_discover)
+    hana_rfc = hana_via_rfc(rfc)
     client.close()
 
-    md = to_markdown(results, a.sid, head)
+    md = to_markdown(results, a.sid, head, hana_rfc)
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "ahc_probe.md").write_text(md, encoding="utf-8")
     (a.out / "ahc_probe.json").write_text(json.dumps(
-        {"sid": a.sid, "header": head, "results": [asdict(r) for r in results]},
+        {"sid": a.sid, "header": head, "results": [asdict(r) for r in results],
+         "hana_via_rfc": hana_rfc},
         indent=2, default=str), encoding="utf-8")
     print(md)
     print(f"\nWritten: {a.out / 'ahc_probe.md'} and ahc_probe.json", file=sys.stderr)

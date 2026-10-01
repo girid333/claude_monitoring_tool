@@ -434,7 +434,9 @@ def a_db02_log(sh: Sheet, c: Ctx, base: dict) -> dict:
                     findings=findings, recommendation="Check the HANA trace files for the "
                     "affected service and the reason for the stop.")
     return dict(triage="expected" if base["sap_status"] == "not_ok" else "ok",
-                headline=(f"No availability events in the last 24 hours — the database has been "
+                headline=(f"No stop or error events in the last 24 hours. The last event was "
+                          f"{last_e} on {last_t:%d.%m.%Y} ({age_h:.0f} h earlier)." if age_h < 24 else
+                          f"No availability events in the last 24 hours — the database has been "
                           f"stable. The last event was {last_e} on {last_t:%d.%m.%Y} "
                           f"({age_h / 24:.0f} days earlier)."),
                 findings=findings,
@@ -780,11 +782,25 @@ def analyze(sheets: dict[str, Sheet], filename: str) -> HealthReport:
             if not sh.tables and sh.text.strip():
                 base["text"] = sh.text[:MAX_TEXT_CHARS]
             fn = ANALYSERS.get(sheet.upper())
+            # D-051: with no SAP verdict (neither OK nor Not OK ticked — e.g. a
+            # direct pull that could not collect this tab) an empty tab is not
+            # evidence of health, so no analyser may read it as "all clear".
+            has_data = any(t.rows for t in sh.tables) or (not sh.tables and len(
+                [ln for ln in sh.text.splitlines() if ln.strip()]) > 4)
+            if sap_status == "unknown" and not has_data:
+                fn = None
             if fn and (sh.tables or sh.text.strip()):
                 try:
                     upd = fn(sh, ctx, base)
                     extra_tables = upd.pop("_extra_tables", [])
                     base.update({k: v for k, v in upd.items() if v is not None or k == "recommendation"})
+                    if sap_status == "unknown" and base.get("triage") == "ok":
+                        # Concerns found in the evidence still count; a clean
+                        # reading without SAP's verdict is only "no evidence".
+                        base["triage"] = "no_data"
+                        base["analysis_note"] = ("SAP gave no OK / Not OK verdict for this check; the "
+                                                 "evidence shown raises no concern but could not be "
+                                                 "fully evaluated. " + (evid or ""))
                     if base.get("recommendation") is None and sap_rec:
                         base["recommendation"] = sap_rec
                 except Exception as exc:  # noqa: BLE001 — never fail the import

@@ -249,3 +249,8 @@
 @media (prefers-reduced-motion: reduce) {
   .sx *, .sx *::before, .sx *::after { animation: none !important; transition: none !important; }
 }
+
+/* D-051: direct pull + export */
+.sx-pull { display: inline-flex; gap: 8px; align-items: center; }
+.sx-source { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 18px; }
+.sx-source .sx-btn { padding: 7px 14px; font-size: 13.5px; }

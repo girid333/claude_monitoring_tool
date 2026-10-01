@@ -58,7 +58,7 @@ export default function Landing() {
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#30D158" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="4" /></svg>
           </span>
           <h2>Health check dashboard</h2>
-          <p>Import the workbook from SAP&apos;s Automated Health Check. Every flagged check is re-read against its evidence tab and marked as needing action, worth a review, or expected behaviour.</p>
+          <p>Pull SAP&apos;s Automated Health Check straight from the system, or import its workbook. Every flagged check is re-read against its evidence tab and marked as needing action, worth a review, or expected behaviour.</p>
           <div className="sx-dest-foot">
             <span className="sx-dest-go">Open dashboard</span>
             {latest ? <span className={`sx-tag ${latest.summary.act ? "sx-t-act" : "sx-t-ok"}`}>{latest.summary.act} to act on</span> : null}

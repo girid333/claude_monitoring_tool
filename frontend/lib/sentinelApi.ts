@@ -31,11 +31,13 @@ export interface HealthReport {
   id: string; filename: string; imported_at: string; report_date: string | null;
   title: string; system: { sid: string; client: string; instances: string[] };
   summary: Summary; checks: Check[]; extra_sheets: string[];
+  source?: "import" | "sap_pull"; has_workbook?: boolean;
 }
 export interface ReportListItem {
   id: string; filename: string; imported_at: string; report_date: string | null;
-  sid: string; client: string; summary: Summary;
+  sid: string; client: string; summary: Summary; source?: "import" | "sap_pull";
 }
+export interface SystemItem { sid: string; system_name?: string }
 
 async function asJson<T>(r: Response): Promise<T> {
   if (!r.ok) {
@@ -56,6 +58,12 @@ export const healthApi = {
     return fetch(`${apiBase()}/api/health/reports`, { method: "POST", body: fd })
       .then(r => asJson<HealthReport>(r));
   },
+  // D-051: collect the health check straight from SAP over SOAP RFC.
+  pull: (sid: string) => fetch(`${apiBase()}/api/health/pull`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sid }),
+  }).then(r => asJson<HealthReport>(r)),
+  systems: () => fetch(`${apiBase()}/api/systems`).then(r => asJson<SystemItem[]>(r)),
+  workbookUrl: (id: string) => `${apiBase()}/api/health/reports/${id}/workbook`,
   remove: (id: string) => fetch(`${apiBase()}/api/health/reports/${id}`, { method: "DELETE" })
     .then(r => { if (!r.ok && r.status !== 404) throw new Error(`Delete failed (${r.status}).`); }),
 };

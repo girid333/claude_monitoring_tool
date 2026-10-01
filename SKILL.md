@@ -381,6 +381,96 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
   `next start` (process is `next-server`) — a stale server silently serves
   the previous build.
 
+### D-051 (2026-10-01) — Health check pulled directly from SAP (SOAP RFC) + Excel export.
+- /health gets **Pull from SAP** (system picker + button) next to Import.
+  `POST /api/health/pull {sid}` (backend/ahc/api.py) uses the registry's
+  SAP credential (D-023) over `/sap/bc/soap/rfc`, writes SAP's AHC workbook
+  (ahc/writer.py), then imports it through the unchanged D-050 parser —
+  the parser is the acceptance test. The workbook is stored next to the
+  report; `GET /api/health/reports/{id}/workbook` exports it ("Export to
+  Excel"). Imports keep their original file too. Reports carry
+  `source: import|sap_pull` and `has_workbook`.
+- **Structure = the sample, exactly.** `ahc/layout.json` is generated from
+  a real SAP export by `python -m ahc.tools.extract_layout <file>` (styles,
+  column widths, Monitors rows, every table header, per-tab title-row
+  details: subtitle merge, SM51's single blank row, header heights). No
+  customer values are copied; "RFCs in table ZCAS_AHC_FILTER" becomes "All
+  RFC destinations". SAP's cell highlighting is reproduced per tab
+  (writer `_highlight`). DB02_Log is oldest-first, newest highlighted.
+- **Read-only allowlist** (`ahc/sap.py READ_ONLY_FMS`): RFC_READ_TABLE,
+  TH_*, ENQUEUE_READ, RSLG_READ_SLG, SAPTUNE_*, GET_CPU/MEM_ALL,
+  SWNC_COLLECTOR_GET_AGGREGATES, GWY_READ_CONNECTIONS, RZL_READ_DIR_LOCAL,
+  SSFR_*, /SDF/SLIC_READ_LICENSES, SXPG_COMMAND_EXECUTE (one SM69 command).
+- **HANA tabs (DB12, DB02_*, DB01) via SM69 `ZAHC_HDBSQL`** run by
+  SXPG_COMMAND_EXECUTE (ahc/hana.py; override name with
+  `AHC_HDBSQL_COMMAND`). SHDB_ASYNC_SQL was rejected (undocumented
+  serialized input → XSLT error). BASIS setup, once per system:
+  HANA user AHCMON with role MONITORING only; as <sid>adm
+  `hdbuserstore SET AHCMON <dbhost>:3<nn>13@<SID> AHCMON <pw>`; SM69
+  command ZAHC_HDBSQL = `/usr/sap/<SID>/hdbclient/hdbsql` with parameters
+  `-U AHCMON -x -j -F |`, "additional parameters allowed"; monitoring user
+  needs S_LOG_COM for it; for SLICENSE also
+  `GRANT SELECT ON <schema>.SAPLIKEY TO AHCMON`. Without the command those tabs are "Not
+  collected" with the reason. Verified live on F4H (2026-10-01, all five
+  HANA tabs collected): SXPG passes the SQL verbatim (quoting it is a HANA
+  syntax error); SM69 parameters + SQL share 255 chars (230 chars of SQL
+  ok, 235 cut, more = TOO_MANY_PARAMETERS → MAX_SQL 225); every protocol
+  line is CUT at 128 chars with trailing blanks dropped, so
+  `HanaViaSm69.table()` reads wide results in column groups, splits a long
+  text column into SUBSTR chunks of 100 and stitches rows back (needs a
+  stable ORDER BY); a cut line is detected by a missing closing "|" or a
+  field count unlike the header; hdbsql escapes quotes in text as \".
+  DB12 = M_BACKUP_CATALOG joined to M_BACKUP_CATALOG_FILES (one row per
+  file, like SAP's export); DB02_Log reads all 28 M_SYSTEM_AVAILABILITY
+  columns. hdbsql prints LOB columns cut to 32 chars with a normal closing
+  "|" (undetectable), so LOBs are always read in chunks (`lobs=`).
+- **SLICENSE from table SAPLIKEY** (/SDF/SLIC_READ_LICENSES returns no
+  licenses on F4H, only CUSTKEY = active hardware key). LIKEY = 4-digit
+  length-prefixed LK|SID|hw key|product (LC rows = last check, skipped);
+  VALUE (NCLOB, so not via RFC_READ_TABLE) = limit|type P/T|signature|
+  installation no|start|end|system no. Read via hdbsql; needs
+  `GRANT SELECT ON <schema>.SAPLIKEY TO AHCMON` (granted on F4H). Status:
+  end < today → Expired; hw key ≠ active → "Valid (inactive Hardware Key)";
+  else Valid. Verified field-by-field against the SLICENSE screen on F4H.
+  Without HANA access it falls back to the FM's rows.
+- **SICK via a background job (the one non-read):** transaction SICK =
+  report RSICC000. ahc/xbp.py runs it through SAP's remote-enabled XBP
+  interface (BAPI_XMI_LOGON, BAPI_XBP_JOB_OPEN / ADD_ABAP_STEP / CLOSE /
+  START_IMMEDIATELY / STATUS_GET / SPOOLLIST_READ, then JOB_DELETE) as job
+  SENTINEL_AHC_SICK and parses the spool: "no errors reported" → OK,
+  anything else → Not OK with the message. Verified on F4H: ~1 s, spool
+  identical to the sample's box, no job left in TBTCO. Only reports in
+  xbp.ALLOWED_REPORTS may run; AHC_NO_JOBS=1 switches it off. RFC user
+  needs S_XMI_PROD + S_BTCH_JOB.
+- **SMMS via sapcontrol (SM69 ZAHC_SAPCONTROL, read-only functions):**
+  RSMONMS_ALV has no selection screen and prints only the instance list in
+  batch; MS_GET_*SERVICE are not remote-enabled. ahc/sapctl.py runs
+  `sapcontrol` through SXPG: GetSystemInstanceList → the MESSAGESERVER
+  instance (F4H: 01), ParameterValue ms/server_port_N there (N = 0.. until
+  "FAIL: Invalid parameter") → PROT/PORT/TIMEOUT/PROCTIMEOUT/EXTBIND/HOST/
+  VCLIENT/ACLFILE, GetAccessPointList → msg_server port active → "Opened".
+  Timeout/proc. time default to 20/60 when unset (as in the sample). Any
+  port not opened → Not OK. SM69: command `sapcontrol`, parameters
+  `-nr 00 -function GetAccessPointList`, additional parameters allowed (an
+  appended -nr/-function overrides). Only GetSystemInstanceList,
+  GetAccessPointList, ParameterValue are sent, arguments validated. RISK:
+  with additional parameters allowed, anyone with S_LOG_COM for the command
+  could append `-function Stop` — restrict S_LOG_COM to the monitoring
+  user or point SM69 at a wrapper script that passes only those three
+  functions. Verified on F4H: 8101 HTTP ms/server_port_0 Opened 20/60.
+- **Not collectable over RFC → "Not collected", never OK:** RFC_Con
+  connection tests (RSRFCCHK), SM04 session priority. Analyser
+  rule: SAP status unknown + no data → triage no_data, not ok.
+- **Gotchas found on F4H:** time windows use SAP's clock
+  (UTC + RFC_SYSTEM_INFO.RFCTZONE), not the container's (5.5 h skew emptied
+  SM21); RFC_READ_TABLE must use DELIMITER "|" (offsets misaligned);
+  namespaced FMs go on the wire as `_-SDF_-...`; TSL1T key is SPRAS;
+  syslog priority from TSL1D.MONBEW (RA/RE very high, GR warning, WH info);
+  SNAP_BEG.FLIST = key(2)+len(3)+value (FC runtime error, AP program).
+- Tests: `test_ahc_pull` (fake `fake_sap_ahc_pull.py` :8091, 14 incl. one
+  opt-in vs a real export with HEALTH_REAL_AHC), `test_ui_health_pull`
+  (UI phase, full backend). Never commit a real customer export.
+
 ---
 
 ## 3. Architecture Snapshot
@@ -820,6 +910,15 @@ Docker rebuild + hand verification on 192.168.0.165 left to Giri (not
 reachable from the Cowork sandbox). NOTE: this repo SKILL.md was last
 synced at Session 8 (D-020); D-021…D-049 live in the account-level skill
 and should be synced back here.
+
+**2026-10-01 — D-051 direct pull (Cowork).** Phase 1 probe (27/33 checks
+sourceable over SOAP RFC), then Phase 2: collectors for all 33 checks,
+SpreadsheetML writer matching the sample's layout, Pull from SAP + Export
+to Excel on /health. After Giri created ZAHC_HDBSQL + the AHCMON
+key, then SELECT on SAPLIKEY, SICK via an RSICC000 job and SMMS via
+ZAHC_SAPCONTROL, the live F4H pull collects 29 of 33 checks in ~6 s (119
+calls); not collected: RFC_Con, SM04 priority, ST11 mtimes, and ST03N (F4H
+is a dummy system with no workload). Full suite green.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

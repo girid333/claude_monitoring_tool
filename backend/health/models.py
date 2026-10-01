@@ -89,6 +89,9 @@ class HealthReport(BaseModel):
     summary: Summary
     checks: list[Check]
     extra_sheets: list[str] = Field(default_factory=list)  # tabs no check points to
+    # D-051: "import" (uploaded SAP export) or "sap_pull" (collected over SOAP RFC)
+    source: Literal["import", "sap_pull"] = "import"
+    has_workbook: bool = False                 # original/generated .XLS kept for export
 
 
 class ReportListItem(BaseModel):
@@ -99,3 +102,4 @@ class ReportListItem(BaseModel):
     sid: str
     client: str
     summary: Summary
+    source: Literal["import", "sap_pull"] = "import"

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   healthApi, TRIAGE_LABEL,
-  type Check, type HealthReport, type ReportListItem, type Triage,
+  type Check, type HealthReport, type ReportListItem, type SystemItem, type Triage,
 } from "@/lib/sentinelApi";
 import CheckDrawer from "./CheckDrawer";
 import Rings, { RingsLegend } from "./Rings";
@@ -51,6 +51,8 @@ export default function HealthDashboard() {
   const [open, setOpen] = useState<Check | null>(null);
   const [over, setOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [systems, setSystems] = useState<SystemItem[]>([]);
+  const [pullSid, setPullSid] = useState("");
 
   const show = useCallback(async (id: string) => {
     setBusy("Loading report…"); setError(null);
@@ -62,6 +64,25 @@ export default function HealthDashboard() {
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(null); }
   }, []);
+
+  useEffect(() => {
+    healthApi.systems().then(xs => { setSystems(xs); if (xs[0]) setPullSid(p => p || xs[0].sid); })
+      .catch(() => setSystems([]));
+  }, []);
+
+  // D-051: pull the health check directly from SAP (SOAP RFC), no file needed.
+  const pull = async () => {
+    if (!pullSid) return;
+    setBusy(`Pulling the health check from ${pullSid} over SOAP RFC…`); setError(null);
+    try {
+      const r = await healthApi.pull(pullSid);
+      setReports(await healthApi.list());
+      setReport(r); setFilter("all");
+      const u = new URL(window.location.href); u.searchParams.set("id", r.id);
+      window.history.replaceState(null, "", u.toString());
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(null); }
+  };
 
   useEffect(() => {
     (async () => {
@@ -127,7 +148,7 @@ export default function HealthDashboard() {
       <div className="sx-page-head">
         <div>
           <h1 className="sx-h2">Health check</h1>
-          <p className="sx-sub">Import the workbook from SAP&apos;s Automated Health Check. Sentinel reads every tab and triages what SAP flagged.</p>
+          <p className="sx-sub">Pull the Automated Health Check directly from SAP, or import the workbook SAP produced. Sentinel reads every tab and triages what SAP flagged.</p>
         </div>
         <div className="sx-tools">
           {reports && reports.length > 0 ? (
@@ -139,6 +160,17 @@ export default function HealthDashboard() {
                 </option>
               ))}
             </select>
+          ) : null}
+          {systems.length > 0 ? (
+            <span className="sx-pull">
+              <select className="sx-select" aria-label="SAP system to pull from" value={pullSid}
+                onChange={e => setPullSid(e.target.value)} data-testid="sx-pull-sid">
+                {systems.map(s => <option key={s.sid} value={s.sid}>{s.sid}{s.system_name && s.system_name !== s.sid ? ` — ${s.system_name}` : ""}</option>)}
+              </select>
+              <button className="sx-btn" onClick={pull} disabled={!!busy || !pullSid} data-testid="sx-pull">
+                Pull from SAP
+              </button>
+            </span>
           ) : null}
           <button className="sx-btn sx-btn-primary" onClick={() => fileRef.current?.click()} disabled={!!busy && busy.startsWith("Reading")}>
             Import workbook
@@ -173,6 +205,16 @@ export default function HealthDashboard() {
                 <div><dt>Instances</dt><dd>{report.system.instances.length || "—"}</dd></div>
               </dl>
               <div style={{ marginTop: 18 }}><RingsLegend summary={report.summary} /></div>
+              <div className="sx-source">
+                <span className={`sx-tag ${report.source === "sap_pull" ? "sx-t-ok" : ""}`}>
+                  {report.source === "sap_pull" ? "Pulled directly from SAP" : "Imported from file"}
+                </span>
+                {report.has_workbook ? (
+                  <a className="sx-btn" href={healthApi.workbookUrl(report.id)} download data-testid="sx-export">
+                    Export to Excel
+                  </a>
+                ) : null}
+              </div>
             </div>
           </section>
 
@@ -232,8 +274,8 @@ export default function HealthDashboard() {
           </section>
 
           <p className="sx-foot" style={{ marginTop: 40 }}>
-            Imported from {report.filename}. Sentinel&apos;s assessment is a reading of SAP&apos;s evidence, not a replacement for it; every check links to the underlying tab.{" "}
-            <button className="sx-link" onClick={remove}>Remove this import</button>
+            {report.source === "sap_pull" ? "Pulled from SAP as" : "Imported from"} {report.filename}. Sentinel&apos;s assessment is a reading of SAP&apos;s evidence, not a replacement for it; every check links to the underlying tab.{" "}
+            <button className="sx-link" onClick={remove}>Remove this {report.source === "sap_pull" ? "pull" : "import"}</button>
           </p>
         </>
       ) : null}

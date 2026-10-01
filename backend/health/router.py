@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import Response
 
 from .analyze import analyze
 from .models import HealthReport, ReportListItem
@@ -39,6 +40,9 @@ async def import_report(file: UploadFile = File(...)) -> HealthReport:
     if not rep.checks:
         raise HTTPException(422, "No health checks found. Import the workbook produced "
                                  "by SAP's Automated Health Check (it has a 'Monitors' tab).")
+    if data[:2] != b"PK":                # SpreadsheetML: keep the original for export
+        rep.has_workbook = True
+        store().save_workbook(rep.id, data)
     store().save(rep)
     return rep
 
@@ -70,3 +74,16 @@ def delete_report(rid: str) -> None:
         store().delete(rid)
     except KeyError:
         raise HTTPException(404, "Report not found.") from None
+
+
+@router.get("/reports/{rid}/workbook")
+def download_workbook(rid: str) -> Response:
+    """D-051: the report as SAP's AHC workbook (SpreadsheetML .XLS) — the
+    uploaded original, or the workbook a direct pull generated."""
+    try:
+        rep, data = store().get(rid), store().workbook(rid)
+    except KeyError:
+        raise HTTPException(404, "No workbook stored for this report.") from None
+    name = rep.filename if rep.filename.upper().endswith((".XLS", ".XML")) else f"{rep.filename}.XLS"
+    return Response(data, media_type="application/vnd.ms-excel",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
