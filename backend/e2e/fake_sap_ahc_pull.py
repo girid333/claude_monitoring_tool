@@ -31,6 +31,7 @@ USER, PASSWORD = "MONITOR", "secret"
 TZ = 19800                                     # +5:30
 CALLS: list[str] = []
 STATE = {"hana": True, "sick_error": False, "sapctl": True, "port_closed": False}
+PERF = {"smon": True, "upd": False, "today": True, "tcdet": True, "work": True}      # /perf/... switches; upd off keeps the AHC SM13 check unchanged
 JOBS: dict = {}          # jobcount -> {"name", "program", "status"}
 SM69 = "ZAHC_HDBSQL"
 
@@ -104,7 +105,17 @@ def tables() -> dict:
                        "FC020CONVT_NO_NUMBER        AP008ZREPORT1TD032ABCDEF0123456789ABCDEF0123456789"],
                       [d(ago(days=3)), "010000", "qas_QAS_00", "OLDUSER", "100", "0000000001", "000", "",
                        "FC010OLD_DUMP  "]]),
-        "VBHDR": (["VBMANDT", "VBUSR", "VBDATE", "VBTCODE", "VBRC", "VBSTATE", "VBNAME"], []),
+        "VBHDR": (["VBKEY", "VBMANDT", "VBUSR", "VBDATE", "VBTCODE", "VBRC", "VBSTATE", "VBNAME"],
+                  [["K1", "100", "ANNA", d(ago(days=5)), "VA01", "0", "", ""],
+                   ["K2", "100", "BOB", d(ago(days=5)), "VA02", "12", "", ""]] if PERF["upd"] else []),
+        "SWNCMONIINDEX": (["COMPONENT", "ASSIGNDSYS", "PERIODTYPE", "PERIODSTRT"],
+                          [[comp, "QAS", "D", day_] for day_ in workload_index_days()
+                           for comp in swnc_components(day_)]
+                          + [["TOTAL", "QAS", "W", d(ago(days=7))], ["prd_PRD_00", "PRD", "D", d(ago(days=60))]]),
+        "DD02L": (["TABNAME", "AS4LOCAL", "TABCLASS"], [["/SDF/SMON_HEADER", "A", "TRANSP"]] if PERF["smon"] else []),
+        "/SDF/SMON_HEADER": (["GUID", "DATUM", "TIME", "SERVER", "ACT_WPS", "ACT_DIA", "USR_TOTAL", "SYS_TOTAL",
+                              "IDLE_TOTAL", "FREE_MEM_PERC", "DIAQ", "UPDQ", "ENQQ", "USERS", "SESSIONS", "SM12_CNT"],
+                             [["G"] + r[:2] + r[2:] for r in smon_rows()] if PERF["smon"] else []),
         "TSP01": (["RQIDENT", "RQCLIENT", "RQOWNER", "RQCRETIME", "RQERROR", "RQPJSERR", "RQPJHERR", "RQTITLE"],
                   [["4711", "100", "GIRI", ago(hours=2).strftime("%Y%m%d%H%M%S") + "00", "", "00001", "00000", "Bad print"],
                    ["4712", "100", "GIRI", ago(hours=3).strftime("%Y%m%d%H%M%S") + "00", "", "00000", "00000", "Fine"]]),
@@ -233,9 +244,10 @@ def handle(fm, fn, body) -> str:
                         "<EXTENDED_MEMORY_USAGE><USED>10</USED><TOTAL>100</TOTAL></EXTENDED_MEMORY_USAGE>"
                         "<SAP_CURSOR_CACHE_TOTAL><ID_HITR>95</ID_HITR><STMT_HITR>70</STMT_HITR></SAP_CURSOR_CACHE_TOTAL>")
     if fm == "SAPTUNE_BUFFER_NAMES":
-        return resp(fm, "<BUFFERNAMES>" + items([{"BUFFERNAME": "PXA"}, {"BUFFERNAME": "CUA"}]) + "</BUFFERNAMES>")
+        return resp(fm, "<BUFFERNAMES>" + items([{"BUFFERNAME": "PXA"}, {"BUFFERNAME": "CUA"}, {"BUFFERNAME": "CTLGA"}]) + "</BUFFERNAMES>")
     if fm == "SAPTUNE_BUFFER_STATISTICS":
-        hit = "4500" if "PXA" in body else "4995"
+        # CTLGA (catalog buffer) runs a low hit ratio on quiet systems and is not rated (F4H: 78 %)
+        hit = "4500" if "PXA" in body else ("2500" if "CTLGA" in body else "4995")
         return resp(fm, f"<BUFFER_STATISTIC><ALLOC_SIZE>5000</ALLOC_SIZE><AVAIL_SIZE>2500</AVAIL_SIZE><MAX_OBJCTS>100</MAX_OBJCTS>"
                         f"<ACT_OBJCTS>40</ACT_OBJCTS><REQUEST>5000</REQUEST><HIT>{hit}</HIT><SWAP>0</SWAP>"
                         f"<DB_ACCESS>12</DB_ACCESS></BUFFER_STATISTIC>")
@@ -247,9 +259,12 @@ def handle(fm, fn, body) -> str:
         return resp(fm, "<TF_MEM_ALL>" + items([{"PHYS_MEM": "32602616", "FREE_MEM": "3458292", "SWAP_CONF": "41943036",
                                                  "SWAP_SIZE": "41943036", "SWAP_FREE": "41943036"}]) + "</TF_MEM_ALL>")
     if fm == "SWNC_COLLECTOR_GET_AGGREGATES":
-        return resp(fm, "<TASKTYPE>" + items([{"TASKTYPE": "01", "COUNT": "200", "RESPTI": "100000", "PROCTI": "50000",
-                                               "CPUTI": "20000", "QUEUETI": "100"},
-                                              {"TASKTYPE": "04", "COUNT": "50", "RESPTI": "500000"}]) + "</TASKTYPE><TIMES/>")
+        day = re.search(r"<PERIODSTRT>([\d-]+)</PERIODSTRT>", body).group(1).replace("-", "")
+        comp = re.search(r"<COMPONENT>(.*?)</COMPONENT>", body).group(1)
+        if day not in workload_index_days() or comp not in swnc_components(day):
+            return fault("NO_DATA_FOUND")
+        part = None if comp == "TOTAL" else swnc_components(day).index(comp)
+        return resp(fm, swnc_day(day, re.search(r"<TCDET\b", body) is not None and PERF["tcdet"], part))
     if fm == "GWY_READ_CONNECTIONS":
         if "<GWSERV>sapgw00</GWSERV>" not in body:
             return fault("GWY_GET_GWSERV_FAILED")
@@ -394,6 +409,84 @@ def sapcontrol(add: str) -> tuple[list[str], int]:
     return head + ["FAIL: function not handled by fake"], 1
 
 
+def workload_index_days() -> list[str]:
+    """SAP keeps 40 days of daily aggregates in this fake (newest = today)."""
+    # /perf/work/off: collector stopped two days ago (no aggregates for today/yesterday)
+    return [(sap_now() - dt.timedelta(days=i)).strftime("%Y%m%d") for i in range(0 if PERF["work"] else 2, 40)]
+
+
+def swnc_components(day: str) -> list[str]:
+    """Like F4H, the last 20 days only exist per instance (no TOTAL built); older days have TOTAL."""
+    recent = day >= (sap_now() - dt.timedelta(days=19)).strftime("%Y%m%d")
+    return ["qas_QAS_00", "qas_QAS_01"] if recent else ["TOTAL"]
+
+
+def _tt(code: str) -> str:
+    return base64.b64encode(bytes.fromhex(code)).decode()   # RAW(1) over SOAP: "01" → "AQ=="
+
+
+def swnc_day(day: str, with_tcdet: bool, part=None) -> str:
+    """SWNC_COLLECTOR_GET_AGGREGATES as F4H returns it: times in MILLISECONDS summed over steps,
+    base64 task types, TIME 'HH--HH', ENTRY_ID in TIMES. part 0/1 = one instance's share."""
+    slow = day == (sap_now() - dt.timedelta(days=3)).strftime("%Y%m%d")      # one bad day in history
+    f = 1.8 if slow else 1.0
+
+    def cnt(n: float) -> int:
+        n = int(n)
+        return n if part is None else (n - n // 2 if part == 0 else n // 2)
+
+    def row(code: str, n: float, **ms) -> dict:
+        c = cnt(n)
+        return {"TASKTYPE": _tt(code), "COUNT": str(c), **{k: f"{v * c:.0f}" for k, v in ms.items()}}
+
+    tasks = [
+        row("01", 12000, RESPTI=850 * f, CPUTI=200, DBTI=300 * f, QUEUETI=20 * f * f, ROLLWAITTI=30, GUITIME=60,
+            LOADGENTI=10, PROCTI=450, LOCKTI=0),
+        row("04", 800, RESPTI=42000, CPUTI=9000, READDIRTI=5000, READSEQTI=20000, CHNGTI=1000, QUEUETI=0),
+        row("FE", 0, RESPTI=0),                                              # empty line: must be skipped
+        row("FE", 5000, RESPTI=120, CPUTI=40, DBTI=50),
+        row("02", 900, RESPTI=90, CPUTI=30, DBTI=45),
+    ]
+    times = []
+    for h in range(24):
+        busy = 1.0 if 8 <= h <= 18 else 0.15
+        n = round(1000 * busy)
+        peak = h == 10                              # dialog queue at the morning peak
+        resp, wait = (1600, 400) if peak else (800, 15)
+        slot = f"{h:02d}--{(h + 1) % 24:02d}"
+        times.append({**row("01", n * 0.6, RESPTI=resp * f, CPUTI=200, READSEQTI=300 * f, QUEUETI=wait),
+                      "TIME": slot, "ENTRY_ID": "VA01".ljust(72) + "T"})
+        times.append({**row("01", n - int(n * 0.6), RESPTI=resp * f, CPUTI=200, READSEQTI=300 * f, QUEUETI=wait),
+                      "TIME": slot, "ENTRY_ID": "SE16".ljust(72) + "T"})
+        times.append({**row("04", 33, RESPTI=40000), "TIME": slot, "ENTRY_ID": "ZREPORT_SLOW".ljust(72) + "R"})
+    tcdet = [
+        {**row("01", 3000, RESPTI=1400, CPUTI=300, DBTI=700), "ENTRY_ID": "VA01", "ACCOUNT": "ANNA"},
+        {**row("01", 1000, RESPTI=1400, CPUTI=300, DBTI=700), "ENTRY_ID": "VA01", "ACCOUNT": "BOB"},  # 2nd user
+        {**row("04", 10, RESPTI=900000, CPUTI=200000, READSEQTI=600000),
+         "ENTRY_ID": "ZREPORT_SLOW                            BATCHJOB_A", "ACCOUNT": "BATCH"},
+        {**row("01", 500, RESPTI=300, CPUTI=80, DBTI=150), "ENTRY_ID": "SE16", "ACCOUNT": "ANNA"},
+        {**row("01", 1, RESPTI=1), "ENTRY_ID": "", "ACCOUNT": "X"},                    # blank: skipped
+    ]
+    out = "<TASKTYPE>" + items(tasks) + "</TASKTYPE><TIMES>" + items(times) + "</TIMES>"
+    return out + ("<TCDET>" + items(tcdet) + "</TCDET>" if with_tcdet else "<TCDET/>")
+
+
+def smon_rows() -> list[list[str]]:
+    """Today: one snapshot per minute for the last 3 h on two servers; plus 3 days ago."""
+    rows = []
+    for back in (range(180, -1, -1) if PERF["today"] else []):
+        t = ago(minutes=back)
+        for srv, base in (("qas_QAS_00", 4), ("qas_QAS_01", 2)):
+            q = "6" if back == 30 and srv == "qas_QAS_00" else "0"
+            rows.append([d(t), tm(t), srv, str(base + 2), str(base), "30", "10", "60", "22", q, "0", "0",
+                         "12", "20", "40"])
+    old = ago(days=3).replace(hour=10, minute=0, second=0)
+    for k in range(0, 60, 5):
+        t = old + dt.timedelta(minutes=k)
+        rows.append([d(t), tm(t), "qas_QAS_00", "9", "8", "70", "20", "10", "8", "15", "2", "0", "40", "60", "300"])
+    return rows
+
+
 RET = "<RETURN><TYPE></TYPE><MESSAGE></MESSAGE></RETURN>"
 
 
@@ -446,6 +539,9 @@ def hdbsql(sql: str) -> tuple[list[str], int]:
         return ["|SCHEMA_NAME|", '|"SAPHANADB"|'], 0
     if "SAPLIKEY" in sql and "FROM SAPHANADB.SAPLIKEY" not in sql:
         return ["* 259: invalid table name:  Could not find table/view SAPLIKEY in schema AHCMON"], 3
+    perf = hana_perf(sql)
+    if perf is not None:
+        return perf, 0
     if "M_HOST_RESOURCE_UTILIZATION" in sql:
         return ["|HOST|USED_PHYSICAL_MEMORY|FREE_PHYSICAL_MEMORY|", '|"hdb"|53687091200|53687091200|'], 0
     m = re.match(r"SELECT (?:TOP (\d+) )?(.*?) FROM (.*)$", sql, re.S)
@@ -466,6 +562,54 @@ def hdbsql(sql: str) -> tuple[list[str], int]:
         return [f"* 260: invalid column name: {want[idx.index(None)]}"], 3
     lob = lambda c, v: v[:32] if c.split(".")[-1] in LOBS and v else v  # noqa: E731
     return [fmt([c.split(".")[-1] for c in want])] + [fmt([_q(lob(names[i], r[i])) for i in idx]) for r in rows], 0
+
+
+def hana_perf(sql: str):
+    """Performance-dashboard HANA reads (D-052), as hdbsql prints them."""
+    n = sap_now()
+    if "VIEW_COLUMNS" in sql and "M_LOAD_HISTORY_HOST" in sql:
+        return ["|COLUMN_NAME|"] + [f'|"{c}"|' for c in ("TIME", "HOST", "CPU", "MEMORY_USED",
+                                                           "MEMORY_ALLOCATION_LIMIT", "DISK_USED", "DISK_SIZE")]
+    if "M_LOAD_HISTORY_HOST" in sql and "MIN(TIME)" in sql:
+        return ["|D|", f'|"{(n - dt.timedelta(days=30)).date()}"|']
+    if "M_LOAD_HISTORY_HOST" in sql and "GROUP BY HOUR(TIME)" in sql:
+        day = re.search(r"TIME >= '([\d-]+)'", sql).group(1)
+        if day < str((n - dt.timedelta(days=30)).date()):
+            return ["|H|C|CM|"] if "AVG(CPU)" in sql else ["|H|M|MM|L|"]
+        hours = range(24) if day < str(n.date()) else range(n.hour + 1)
+        if "AVG(CPU)" in sql:
+            return ["|H|C|CM|"] + [f"|{h}|{30 + (40 if h == 10 else 0)}.5|{45 + (47 if h == 10 else 0)}.0|" for h in hours]
+        return ["|H|M|MM|L|"] + [f"|{h}|{20 * GB_}|{(28 if h == 10 else 22) * GB_}|{32 * GB_}|" for h in hours]
+    if "M_LOAD_HISTORY_HOST" in sql and "ORDER BY TIME DESC" in sql:
+        cols = re.match(r"SELECT (?:TOP \d+ )?(.*?) FROM", sql).group(1).split(", ")
+        vals = {"HOST": '"hdb"', "TIME": f'"{n:%Y-%m-%d %H:%M:%S}.000000000"', "CPU": "37",
+                "MEMORY_USED": str(26 * GB_), "MEMORY_ALLOCATION_LIMIT": str(32 * GB_), "DISK_USED": str(100 * GB_),
+                "DISK_SIZE": str(200 * GB_)}
+        return ["|" + "|".join(cols) + "|", "|" + "|".join(vals[c] for c in cols) + "|"]
+    if "FROM M_CONNECTIONS" in sql:
+        return ["|N|R|", "|142|6|"]
+    if "COUNT(*) AS N FROM M_BLOCKED_TRANSACTIONS" in sql:
+        return ["|N|", "|0|"]
+    if "STATISTICS_CURRENT_ALERTS" in sql and "GROUP BY ALERT_RATING" in sql:
+        return ["|R|N|", "|4|1|", "|3|2|"]
+    if "FROM M_CS_UNLOADS" in sql:
+        return ["|N|", "|3|"]
+    if "FROM M_SAVEPOINTS" in sql:
+        return ["|A|M|", "|850000|4200000|"]
+    if "FROM M_SQL_PLAN_CACHE" in sql and "AS S" in sql:
+        strip = "REPLACE(" in sql
+        fix = lambda s: (s.replace('"', "") if strip else s)[:90].replace('"', '\\"')  # noqa: E731
+        return ["|S|"] + [f'|"{fix(s)}"|' for s in (
+            'SELECT * FROM "VBAK" WHERE "MANDT" = ? AND "ERDAT" > ? -- \"hot\" statement from VA01 reporting run',
+            'UPDATE "NRIV" SET "NRLEVEL" = ? WHERE "CLIENT" = ? AND "OBJECT" = ?')]
+    if "FROM M_SQL_PLAN_CACHE" in sql:
+        return ["|STATEMENT_HASH|EXECUTION_COUNT|TOTAL_EXECUTION_TIME|AVG_EXECUTION_TIME|",
+                '|"a1b2c3d4e5f60718293a4b5c6d7e8f90"|1200|900000000|750000|',
+                '|"ffeeddccbbaa99887766554433221100"|55000|300000000|5454|']
+    return None
+
+
+GB_ = 1024 ** 3
 
 
 def _index(names, col):
@@ -493,9 +637,14 @@ class H(BaseHTTPRequestHandler):
             STATE["sick_error"] = False
             STATE["sapctl"] = True
             STATE["port_closed"] = False
+            PERF.update(smon=True, upd=False, today=True, tcdet=True, work=True)
             return self._send("ok", ctype="text/plain")
         if self.path.startswith("/jobs"):
             return self._send(json.dumps(JOBS), ctype="application/json")
+        if self.path.startswith("/perf/"):
+            k, v = self.path.split("/")[2:4]
+            PERF[k] = v == "on"
+            return self._send("ok", ctype="text/plain")
         if self.path.startswith("/sapctl/off"):
             STATE["sapctl"] = False
             return self._send("ok", ctype="text/plain")

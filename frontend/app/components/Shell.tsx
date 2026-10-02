@@ -45,7 +45,8 @@ const REPLAY_NAV = [
 ];
 
 // Pages that bring their own full-width Sentinel chrome.
-const BARE = (p: string) => p === "/" || p === "/health" || p.startsWith("/health/");
+const BARE = (p: string) => p === "/" || p === "/health" || p.startsWith("/health/")
+  || p === "/performance" || p.startsWith("/performance/");   // D-052
 
 export default function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname() || "/";

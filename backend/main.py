@@ -123,6 +123,8 @@ app.include_router(health_router)
 # (/api/health/pull). Own module (backend/ahc/), one include line.
 from ahc.api import router as ahc_router  # noqa: E402
 app.include_router(ahc_router)
+from perf.api import router as perf_router  # noqa: E402  (D-052)
+app.include_router(perf_router)
 
 store = RunStore(RUNS_DB_PATH)
 _event_queues: dict[str, asyncio.Queue] = {}

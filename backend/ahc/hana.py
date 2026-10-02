@@ -81,6 +81,19 @@ def _split(line: str) -> list[str]:
     return out
 
 
+def sxpg_quotes(sql: str) -> str:
+    """SXPG splits ADDITIONAL_PARAMETERS like a shell and insists on a blank after a closing
+    single quote ("No space found after closing ' in argument string", F4H): '' ) not '')."""
+    out, inside = [], False
+    for i, ch in enumerate(sql):
+        out.append(ch)
+        if ch == "'":
+            inside = not inside
+            if not inside and i + 1 < len(sql) and not sql[i + 1].isspace():
+                out.append(" ")
+    return "".join(out)
+
+
 class HanaViaSm69:
     def __init__(self, sap: Sap, command: Optional[str] = None):
         self.sap = sap
@@ -89,6 +102,7 @@ class HanaViaSm69:
         self._why = ""
 
     def _run(self, sql: str) -> list[str]:
+        sql = sxpg_quotes(sql)
         if len(sql) > MAX_SQL:
             raise ValueError(f"SQL too long for SXPG ({len(sql)} > {MAX_SQL} chars)")
         r = self.sap.call("SXPG_COMMAND_EXECUTE", COMMANDNAME=self.command,

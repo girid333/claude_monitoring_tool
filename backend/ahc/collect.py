@@ -760,25 +760,21 @@ _TASKTYPE = {"01": "DIALOG", "02": "UPDATE", "03": "SPOOL", "04": "BACKGROUND", 
 
 def c_st03n(x: Ctx) -> Result:
     day = (x.now - dt.timedelta(days=1)).date()
-    try:
-        r = x.sap.call("SWNC_COLLECTOR_GET_AGGREGATES", COMPONENT="TOTAL", ASSIGNDSYS=x.sid, PERIODTYPE="D",
-                       PERIODSTRT=day.isoformat(), TASKTYPE=[], TIMES=[])
-        tasks = as_rows(r.get("TASKTYPE"))
-    except RfcSoapError as exc:
-        if "NO_DATA_FOUND" not in exc.message:
-            raise
-        tasks = []
+    # SWNC_COLLECTOR_GET_AGGREGATES returns ms; TOTAL may be missing (instances summed) — D-052 live findings.
+    from perf.collect import _aggregates, task_line
+    r = _aggregates(x.sap, x.sid, day, [])
+    tasks = r["TASKTYPE"] if r else []
     rows = []
     for t in tasks:
         n = to_float(first(t, "COUNT", "DCOUNT"))
         if not n:
             continue
-        avg = lambda *k: f"{to_float(first(t, *k)) / n:.1f}"  # noqa: E731
-        code = first(t, "TASKTYPE")
-        rows.append([_TASKTYPE.get(code.upper(), code), str(int(n)), avg("RESPTI"), avg("PROCTI"), avg("CPUTI"),
-                     avg("READDIRTI", "DBTIME"), "0.0", avg("QUEUETI"), avg("ROLLINTI"), avg("ROLLWAITTI"),
-                     avg("GENERATETI", "LOADGENTI"), avg("ENQTI"), avg("RFCTI"), avg("FRONTENDTI"),
-                     avg("GUITIME"), first(t, "GUICNT")])
+        tl = task_line(t)
+        avg = lambda *k: f"{sum(to_float(t.get(x)) for x in k) / n:.1f}"  # noqa: E731
+        rows.append([tl["name"], str(int(n)), f"{tl['avg_resp']:.1f}", f"{tl['avg_proc']:.1f}", f"{tl['avg_cpu']:.1f}",
+                     f"{tl['avg_db']:.1f}", avg("DBP_TIME"), f"{tl['avg_wait']:.1f}", avg("ROLLINTI"),
+                     f"{tl['avg_rollwait']:.1f}", f"{tl['avg_load']:.1f}", f"{tl['avg_lock']:.1f}", avg("CPICTI"),
+                     avg("GUINETTIME"), f"{tl['avg_gui']:.1f}", first(t, "GUICNT")])
     subtitle = f"Date: {day:%d.%m.%Y} - Workload Overview: Average time per step in ms"
     if not rows:
         v = Verdict(None, f"No workload recorded for {day:%d.%m.%Y} (SWNC_COLLECTOR_GET_AGGREGATES is empty) — "

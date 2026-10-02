@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 
 /* Routes: the existing Landscape/Core BASIS UI moves to /basis, the WebGUI
    recorder + data runs to /replay. Adjust hrefs here if they live elsewhere. */
-export const ROUTES = { home: "/", basis: "/basis", health: "/health", replay: "/replay" };
+export const ROUTES = { home: "/", basis: "/basis", health: "/health", perf: "/performance", replay: "/replay" };
 
 export default function TopBar() {
   const path = usePathname() || "/";
@@ -30,6 +30,7 @@ export default function TopBar() {
         <nav className="sx-nav" aria-label="Main">
           <Link href={ROUTES.basis} aria-current={cur(ROUTES.basis)}>Monitoring</Link>
           <Link href={ROUTES.health} aria-current={cur(ROUTES.health)}>Health check</Link>
+          <Link href={ROUTES.perf} aria-current={cur(ROUTES.perf)}>Performance</Link>
           <Link href={ROUTES.replay} aria-current={cur(ROUTES.replay)}>Record and replay{" "}<span className="sx-lab">Lab</span></Link>
         </nav>
       </div>

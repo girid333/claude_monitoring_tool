@@ -74,3 +74,85 @@ export const TRIAGE_LABEL: Record<Triage, string> = {
 };
 
 export function clearCount(s: Summary): number { return s.ok + s.expected; }
+
+// ── D-052: Performance ─────────────────────────────────────────────────────
+export type Rating = "good" | "warning" | "serious" | "critical" | "unknown";
+export interface PerfKpi {
+  id: string; label: string; value: number | null; unit: string; rating: Rating;
+  detail: string; target: string; group: "SAP" | "HANA"; spark: number[];
+}
+export interface HourPoint {
+  hour: number; label?: string; steps: number; dia_steps: number; avg_resp: number;
+  cpu: number; db: number; wait: number; other: number;
+}
+export interface TaskLine {
+  code: string; name: string; steps: number; avg_resp: number; avg_cpu: number; avg_db: number;
+  avg_wait: number; avg_rollwait: number; avg_gui: number; avg_load: number; total_resp_s: number;
+}
+export interface TopTx {
+  name: string; task: string; steps: number; total_s: number; share: number;
+  avg_resp: number; avg_cpu: number; avg_db: number; users: number | null;
+}
+export interface Workload { date: string; tasks: TaskLine[]; hourly: HourPoint[]; top: TopTx[]; steps: number }
+export interface WpCount { total: number; running: number; waiting: number; hold: number; stopped: number }
+export interface SmonPoint {
+  time: string; act_wps: number; act_dia: number; cpu: number; free_mem: number; diaq: number;
+  updq: number; enqq: number; users: number; sessions: number; locks: number; servers: number;
+}
+export interface Smon {
+  installed: boolean; active: boolean; last: string | null; why?: string;
+  series?: SmonPoint[]; latest?: SmonPoint | null;
+}
+export interface HanaHour { hour: number; cpu_avg: number; cpu_max: number; mem_avg_gb: number; mem_max_gb: number; limit_gb: number }
+export interface HanaSql { hash: string; executions: number; total_s: number; avg_ms: number; share: number; statement: string }
+export interface HanaLive {
+  hosts: { host: string; cpu: number | null; mem_used_gb: number | null; mem_limit_gb: number | null;
+           disk_used_gb?: number | null; disk_size_gb?: number | null }[];
+  connections: number | null; running_statements: number | null; blocked: number | null;
+  alerts: Record<string, number>; unloads_24h: number | null;
+  savepoint_avg_s: number | null; savepoint_max_s: number | null; top_sql: HanaSql[]; today?: HanaHour[];
+}
+export interface SapLive {
+  servers: { name: string; host: string; active: boolean; wp: Record<string, WpCount>; busy_dia: number; total_dia: number }[];
+  wp: Record<string, WpCount>; dia_util: number | null;
+  cpu: { util: number | null; cpus: number | null; load1: number; load15: number };
+  memory: { phys_mb: number | null; free_mb: number | null; free_pct: number | null; swap_used_pct: number | null };
+  users: number | null; sessions: number | null; locks: number | null;
+  updates_pending: number | null; update_errors: number | null; jobs_running: number | null;
+  buffers: { buffers: { name: string; hit: number | null; swaps: number; free_pct: number | null; requests: number }[];
+             swaps: number; worst_hit: number | null } | null;
+}
+export interface PerfView {
+  mode: "live" | "day"; date?: string; sid: string; client: string; release: string; db: string; host: string;
+  as_of: string; overall: { score: number | null; grade: string; rating: Rating; counts: Record<string, number> };
+  kpis: PerfKpi[]; findings: { kpi: string; rating: Rating; title: string; detail: string; recommendation: string }[];
+  sap?: SapLive; workload: Workload | null; hourly: HourPoint[]; smon: Smon; hana?: HanaLive | null;
+  hana_hours?: HanaHour[]; notes: string[]; took_s: number; calls: number;
+}
+export interface PerfRanges {
+  sid: string; today: string; workload_days: string[]; hana_from: string | null; oldest: string | null;
+  limit_days: number; smon: Smon; notes: string[];
+}
+
+export const perfApi = {
+  live: (sid: string) => fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/live`).then(r => asJson<PerfView>(r)),
+  day: (sid: string, date: string) =>
+    fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/day?date=${date}`).then(r => asJson<PerfView>(r)),
+  ranges: (sid: string) => fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/ranges`).then(r => asJson<PerfRanges>(r)),
+  scheduleSmon: (sid: string) => fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/smon/schedule`, { method: "POST" })
+    .then(r => asJson<{ ok: boolean; message: string }>(r)),
+  /** Builds the file from the exact view on screen and saves it. */
+  exportView: async (view: PerfView, format: "xlsx" | "pdf") => {
+    const r = await fetch(`${apiBase()}/api/perf/export?format=${format}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(view),
+    });
+    if (!r.ok) await asJson(r);
+    // Content-Disposition isn't readable cross-origin (no Expose-Headers), so name it here.
+    const when = view.mode === "day" ? view.date : view.as_of.slice(0, 16).replace(" ", "_").replace(":", "");
+    const name = `Performance_${view.sid}_${when}.${format}`.replace(/[^A-Za-z0-9._-]/g, "_");
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement("a");
+    a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  },
+};

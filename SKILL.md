@@ -499,6 +499,88 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
   opt-in vs a real export with HEALTH_REAL_AHC), `test_ui_health_pull`
   (UI phase, full backend). Never commit a real customer export.
 
+### D-052 (2026-10-02) — Performance section: SAP + HANA, live and day analysis.
+- New `/performance` page (TopBar "Performance"; Shell treats it as a bare
+  Sentinel page). Backend `backend/perf/` mounted with one include_router:
+  `GET /api/perf/{sid}/live`, `GET /api/perf/{sid}/day?date=`,
+  `GET /api/perf/{sid}/ranges`, `POST /api/perf/export?format=xlsx|pdf`
+  (built from the exact view the browser posts back), and
+  `POST /api/perf/{sid}/smon/schedule` (501 until verified live).
+- **Giri's decisions (2026-10-02):** history = whatever SAP itself keeps
+  (no Sentinel-side storage; picker limited to SAP's oldest day, max 90);
+  SMON not active → offer to schedule it, on decline show the live view
+  from read-only sources; refresh manual + optional auto 30/60 s; PDF is
+  EarlyWatch-style (rating badge, KPI table with labelled traffic lights,
+  hourly chart, task types, top transactions, HANA, findings +
+  recommendations).
+- **Sources:** live = TH_WPINFO, GET_CPU_ALL/GET_MEM_ALL, TH_USER_LIST,
+  SAPTUNE_* (ST02), ENQUEUE_READ, VBHDR, TBTCO, SWNC for today+yesterday
+  (last-24 h hourly profile), /SDF/SMON_HEADER, HANA M_LOAD_HISTORY_HOST
+  (columns intersected with SYS.VIEW_COLUMNS), M_CONNECTIONS,
+  M_BLOCKED_TRANSACTIONS, STATISTICS_CURRENT_ALERTS, M_CS_UNLOADS (low
+  memory, 24 h), M_SAVEPOINTS, M_SQL_PLAN_CACHE top 10. Day = SWNC for that
+  date (TASKTYPE, TIMES hourly, TCDET top transactions aggregated over
+  users), SMON 15-min buckets, HANA hourly avg/max (two SQLs — one was 242
+  chars, over the 225 limit). Ranges = SWNCMONIINDEX (PERIODTYPE D,
+  COMPONENT TOTAL) + MIN(TIME) of M_LOAD_HISTORY_HOST.
+- **SWNC facts (verified live on F4H 2026-10-02 — the research version was
+  wrong):** SWNC_COLLECTOR_GET_AGGREGATES returns MILLISECONDS (its FACTOR
+  parameter, default 1000, divides the stored µs): avg ms = total/COUNT.
+  TASKTYPE arrives base64 RAW(1) ("AQ==" = 01, "/g==" = FE = RFC) in
+  TASKTYPE, TIMES and TCDET → `perf.collect.tt_code`. A system whose
+  collector never built COMPONENT='TOTAL' only has instance components
+  (F4H: nwrhel9_F4H_00) → `_aggregates` reads SWNCMONIINDEX, uses TOTAL when
+  present, else calls every instance and sums. TIMES.TIME is 'HH--HH'.
+  TCDET can be empty; TIMES then carries ENTRY_ID (name padded to 72 + a
+  trailing T/R type flag, stripped) → top transactions from TIMES, users
+  "–". DB time = DBTI, else READDIR+READSEQ+CHNG (TIMES has no DBTI). The
+  raw task-type → name table is not in DDIC (DD07T empty, the SWNCWDDOMTTCHAR
+  domain uses letters); unknown codes show "TYPE xx" — ahc's old 21–27/65
+  guesses were dropped. AHC ST03N tab uses the same `_aggregates`.
+  F4H's collector (SAP_COLLECTOR_FOR_PERFMONITOR) last ran 2025-10-17, so its
+  workload is outside the 90-day window; live mode says so in a note and in
+  the dialog KPI detail. The day API rejects dates older than LIMIT_DAYS.
+  /SDF/SMON_HEADER fields: DATUM TIME SERVER ACT_WPS ACT_DIA USR/SYS/
+  IDLE_TOTAL FREE_MEM_PERC DIAQ UPDQ ENQQ USERS SESSIONS SM12_CNT …
+- **SXPG quoting (F4H):** a closing `'` must be followed by a blank ("No
+  space found after closing ' in argument string") — `'')` and
+  `'YYYY-MM-DD')` failed. `ahc.hana.sxpg_quotes` inserts the blank for every
+  HANA SQL.
+- **ST02 rating:** only EWA-rated buffers count for "worst hit"
+  (PXA, TABL, TABLP, CUA, PRES, TTAB/FTAB/SNTAB/IRBD); F4H's catalog buffer
+  CTLGA at 78 % had made the KPI critical.
+- **HANA history gaps:** F4H's load history only has the hours the box was
+  up (today: 00 and 22). UI and PDF lay out one slot per hour and break the
+  line at missing hours (reportlab joins across None → one series row per
+  unbroken run) instead of drawing a straight line over 22 hours.
+- **PDF:** every SAP/HANA string is XML-escaped (ENTRY_ID `<AD_MSBUF>`
+  vanished as reportlab markup; SQL with `<` would raise).
+- **Ratings (EarlyWatch guidance):** dialog resp ≤1000 good, ≥1200 serious,
+  ≥2000 critical; DB/CPU share ≤40 %; wait ≤10 % / 50 ms; roll wait and GUI
+  ≤200 ms; buffer hit ≥98 %; WP busy / host CPU / HANA CPU 70-85-95 %;
+  HANA memory vs allocation limit 80-90-95 %. Score = 100 − 6/15/30 per
+  warning/serious/critical, grade A–E, a critical caps the grade at C.
+- **Charts:** hand-built SVG (no chart library), dark categorical palette
+  validated with the dataviz validator against #141417 (CPU #3987e5, DB
+  #d95926, wait #199e70, other #c98500; CVD ΔE ≥ 8.4); status colours only
+  with icon+label; one y-axis per chart; hover tooltips everywhere.
+- **HANA text gotcha:** statement text goes through SXPG, so quotes are
+  stripped in SQL with REPLACE(…, CHAR(34), '') — a literal `"` would be
+  escaped by hdbsql (line growth past 128) and might be parsed by SXPG.
+- **Export filename** is built in the browser: Content-Disposition is not
+  readable cross-origin (no Expose-Headers).
+- **SMON on F4H:** /SDF/SMON installed, never run (/SDF/SMON_RUN empty, no
+  variants of /SDF/SMON_START). Scheduling stays 501: it is a write to the
+  customer system (XBP variant + job for /SDF/SMON_START, or the
+  /SDF/SMON_RUN + WATCHDOG mechanism) and needs Giri's go-ahead plus a
+  verified selection-screen parameter list.
+- Tests: `test_perf` (20, fake mirrors F4H: ms, base64 task types, instance-only
+  recent days + TOTAL older days, TIMES ENTRY_ID / TCDET off switch, collector-stopped switch,
+  CTLGA buffer, slow day −3, 10:00
+  queue peak, 2 users per tcode, blank tcode, quoted SQL, SMON 2 servers,
+  update errors, read-only call check) and `test_ui_perf` (6: live, day,
+  exports, auto refresh, SMON offer/decline/schedule, mobile).
+
 ---
 
 ## 3. Architecture Snapshot
@@ -947,6 +1029,22 @@ key, then SELECT on SAPLIKEY, SICK via an RSICC000 job and SMMS via
 ZAHC_SAPCONTROL, the live F4H pull collects 29 of 33 checks in ~6 s (119
 calls); not collected: RFC_Con, SM04 priority, ST11 mtimes, and ST03N (F4H
 is a dummy system with no workload). Full suite green.
+
+**2026-10-02 — D-052 Performance section (Cowork).** Researched SMON,
+ST03N/SWNC, ST02, HANA statistics and EWA thresholds; built backend/perf/
+(live, day, ranges, xlsx + EWA-style PDF) and /performance UI against an
+extended adversarial fake; fixed the AHC ST03N unit bug found on the way.
+F4H was unreachable all session — live verification and SMON scheduling
+are the next steps.
+
+**2026-10-02 — D-052 live test on F4H (Cowork).** Found and fixed: SWNC in
+ms not µs (perf + AHC ST03N were 1000× too small), base64 task types, no
+TOTAL component (instances summed), TIMES 'HH--HH', top transactions from
+TIMES when TCDET is empty, SXPG quote rule broke HANA history range + top
+SQL, CTLGA made buffers critical, PDF dropped `<…>` names, no explanation
+when the collector is stopped, day API allowed dates beyond 90 days,
+HANA chart drew straight lines across hours with no history. All
+suites green; device copy synced, uncommitted.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*
