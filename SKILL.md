@@ -623,6 +623,42 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
 - Tests: `test_perf_landscape` (18, fake `/perf/multi|cloud|nettrace|hsr_bad`)
   and `test_ui_perf` test_07.
 
+### D-052c (2026-10-03) — Schedule /SDF/SMON (or /SDF/MON) daily monitoring from Sentinel.
+- Giri asked for it; defaults (his choice): every 10 s, keep 14 days, both
+  editable. A WRITE: the UI shows a form listing every job it creates and
+  sends `{"confirm": true}` only from its "Schedule in <SID>" button;
+  `POST /api/perf/{sid}/smon/schedule` refuses without it (400),
+  `AHC_NO_JOBS=1` → 409. `GET …/smon/schedule` = status (read-only),
+  `POST …/smon/unschedule {"confirm": true}` deletes future daily jobs.
+- **How SAP does it (sources read with RPY_PROGRAM_READ on F4H):** the
+  "Schedule Daily Monitoring" button = report /SDF/SMON_START_CM, a dialog
+  (CALL SCREEN 1001, logic in AT SELECTION-SCREEN 'CRET'), not runnable in
+  batch. It creates job /SDF/SMON_SCHEDULER (today now + every day from
+  tomorrow at st_tim, PRDDAYS 1) with steps SUBMIT /SDF/SMON_START WITH
+  schedld = 'X' … and /SDF/SMON_REORG. /SDF/SMON_START inserts the
+  "Daily Monitoring dd.mm.yyyy" row in /SDF/SMON_RUN, registers one
+  /SDF/SMON_COLLECT_DATA per server in /SDF/SMON_CALL, calls
+  /SDF/SMON_COLLECTOR_START and schedules /SDF/SMON_WATCHDOG (every 5 min,
+  first run +1 h). /SDF/MON: same with /SDF/MON_START, /SDF/MON_REORG,
+  /SDF/MON_SCHEDULER, /SDF/ANALYSES; /SDF/MON_HEADER has no NETRTT and no
+  FREE_MEM_PERC (Sentinel reads it when /SDF/SMON is absent).
+- **Sentinel = the same through XBP** (`perf/smon_sched.py`): JOB_OPEN, two
+  ADD_ABAP_STEP with SELINFO (temporary variant, every parameter passed
+  explicitly — names from BAPI_XBP_READ_SELSCREEN, values = SAP's
+  DEFAULTs), JOB_CLOSE, START_IMMEDIATELY (today) / HEADER_MODIFY (daily).
+- **F4H findings (2026-10-03 live):** HEADER_MODIFY needs `MASK-STARTCOND
+  = 'X'` and ISO dates ("Invalid start date" otherwise; a half-built job is
+  now deleted on failure). /SDF/SMON_COLLECTOR_START only starts collectors
+  whose run has begun (st_tim ≤ sy-uzeit) — the first test used now+20 s,
+  so F4H's first run waited for the watchdog; today's start is now now−1 min.
+  Job log "NetRTT frequency too high (limit <4 times/minute)" → NETRTTCT =
+  15 // interval + 1. F4H now has job /SDF/SMON_SCHEDULER 11441500 (daily
+  00:00), today's run 11:44–23:59 every 10 s and the watchdog.
+- RFC_READ_REPORT does not exist on F4H (two CALL_FUNCTION_NOT_FOUND dumps
+  at 11:26 came from probing it); RPY_PROGRAM_READ works.
+- Tests: `test_perf_smon_sched` (12; fake XBP with MASK check, overlap
+  refusal, /SDF/MON mode) and `test_ui_perf` test_05 (form → schedule → stop).
+
 ---
 
 ## 3. Architecture Snapshot
@@ -1091,6 +1127,33 @@ suites green; device copy synced, uncommitted.
 **2026-10-03 — D-052b landscape (Cowork).** Multi-instance, HANA scale-out
 and HSR analysis plus "closest app server to the DB" with cloud placement;
 ZAHC_CLOUDMETA script for BASIS; verified single-server paths on F4H.
+
+**2026-10-03 — D-052c SMON scheduling (Cowork).** Schedule/stop /SDF/SMON
+(or /SDF/MON) daily monitoring from the Performance page through XBP; verified
+on F4H (daily job released, today's run created, watchdog scheduled).
+
+**2026-10-03 — Full review before commit (Cowork).** Three parallel reviews
+(perf backend, perf frontend, AHC/health) found and fixed: half-built XBP jobs
+left behind on failure; no lock against double scheduling; live SMON window
+lost the hour before midnight; one ST03N read error 502'd the whole view;
+HANA top SQL text paired by position (now by hash), newline splits and a
+`' '` literal SXPG rejects (F4H: "Missing ' in argument string" → CHAR(32),
+`sxpg_safe` now refuses `' '`); HANA live window moving between column-group
+reads (now a fixed window from MAX(TIME)); bad API input → 500 (now 400);
+DST ignored (RFCTZONE = SY-TZONE without DST, + RFCDAYST); AL08/SM04 dated
+yesterday's sessions today (false old-lock alarms); ST06 OK without CPU data;
+SM21 tab lost on an empty SLGTYPE; certificate subjects with OIDs/ST= read
+as "no certificate" → false OK; xlsx formula injection from SAP text; `|`
+inside RFC_READ_TABLE values shifted columns (false OK in SM37);
+SRT_MMASTER CREATED_AT is UTC; DB12 chunk SQL > 225 chars; RFC_Con deadline
+not enforced (pool waited for hung threads); SOAP fault without children →
+AttributeError. Frontend: stale load after a long SMON write, double live
+read on open, ranges race between systems, failed auto refresh blanked the
+page, Enter in the SMON form sent the write, duplicate React keys, unrated
+buffers coloured, "use read-only sources" global, export/refresh busy
+clash, HANA platform fallback, 0 % memory for unknown limit. Regression
+tests: `test_review_fixes` (15) + additions in test_perf / test_perf_smon_sched.
+Verified on F4H: live/day views, top SQL, 36 s AHC pull.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

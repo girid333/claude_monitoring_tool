@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { healthApi, perfApi } from "@/lib/sentinelApi";
 import type { PerfKpi, PerfRanges, PerfView, Rating, SystemItem } from "@/lib/sentinelApi";
 import LandscapePanel from "./LandscapePanel";
+import SmonScheduler from "./SmonScheduler";
 import { HourlyStack, Meter, PctLines, ScoreDial, SERIES, Spark, STATUS, STATUS_LABEL, StatusPill, WpBars } from "./PerfCharts";
 
 /* D-052 — SAP + HANA performance. Live status (manual refresh, optional auto
@@ -41,8 +42,8 @@ export default function PerfDashboard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [auto, setAuto] = useState(0);
-  const [smonDeclined, setSmonDeclined] = useState(false);
-  const [smonMsg, setSmonMsg] = useState<string | null>(null);
+  const [declinedFor, setDeclinedFor] = useState<Record<string, boolean>>({});   // "use read-only sources", per system
+  const [exporting, setExporting] = useState<string | null>(null);
   const [lastLoad, setLastLoad] = useState<Date | null>(null);
   const inFlight = useRef(false);
   const seq = useRef(0);
@@ -53,29 +54,45 @@ export default function PerfDashboard() {
 
   useEffect(() => {
     if (!sid) return;
+    let gone = false;                               // a slower answer for the previous system must not land
     setRanges(null);
-    perfApi.ranges(sid).then(r => { setRanges(r); setDate(d => d || r.workload_days[1] || r.workload_days[0] || r.today); })
-      .catch(() => setRanges(null));
+    perfApi.ranges(sid).then(r => {
+      if (gone) return;
+      setRanges(r);
+      // newest day SAP still holds inside the analysis window (F4H's ST03N days are older than 90 days)
+      const lim = new Date(r.today); lim.setDate(lim.getDate() - r.limit_days);
+      const lo = lim.toISOString().slice(0, 10);
+      const yest = new Date(r.today); yest.setDate(yest.getDate() - 1);
+      setDate(d => d || r.workload_days.find(x => x < r.today && x >= lo) || yest.toISOString().slice(0, 10));
+    }).catch(() => { if (!gone) setRanges(null); });
+    return () => { gone = true; };
   }, [sid]);
+
+  const dayKey = mode === "day" ? date : "";        // a date change must not re-read the LIVE view
 
   const load = useCallback(async (quiet = false) => {
     if (!sid) return;
-    if (mode === "day" && !date) return;
+    if (mode === "day" && !dayKey) { ++seq.current; inFlight.current = false; setBusy(null); return; }
     if (quiet && inFlight.current) return;          // auto refresh never stacks requests
     const ticket = ++seq.current;                   // the latest request wins (system/date/mode changes)
     inFlight.current = true;
-    if (!quiet) setBusy(mode === "live" ? `Reading live performance data from ${sid}…` : `Analysing ${date} in ${sid}…`);
-    setError(null);
+    if (!quiet) setBusy(mode === "live" ? `Reading live performance data from ${sid}…` : `Analysing ${dayKey} in ${sid}…`);
+    if (!quiet) setError(null);
     try {
-      const v = mode === "live" ? await perfApi.live(sid) : await perfApi.day(sid, date);
+      const v = mode === "live" ? await perfApi.live(sid) : await perfApi.day(sid, dayKey);
       if (ticket !== seq.current) return;
-      setView(v); setLastLoad(new Date());
+      setView(v); setLastLoad(new Date()); setError(null);
     } catch (e) {
-      if (ticket === seq.current) { setError(String((e as Error).message || e)); setView(null); }
+      if (ticket !== seq.current) return;
+      // a failed auto refresh keeps the last good view on screen
+      setError((quiet ? "Auto refresh failed — showing the previous reading: " : "") + String((e as Error).message || e));
+      if (!quiet) setView(null);
     } finally {
       if (ticket === seq.current) { inFlight.current = false; setBusy(null); }
     }
-  }, [sid, mode, date]);
+  }, [sid, mode, dayKey]);
+  const loadRef = useRef(load);
+  loadRef.current = load;                           // callbacks from long writes reload the CURRENT selection
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -97,17 +114,13 @@ export default function PerfDashboard() {
   const smon = view?.smon;
 
   const exportAs = async (f: "xlsx" | "pdf") => {
-    if (!view) return;
-    setBusy(f === "pdf" ? "Building the PDF report…" : "Building the Excel workbook…");
-    try { await perfApi.exportView(view, f); } catch (e) { setError(String((e as Error).message || e)); } finally { setBusy(null); }
+    if (!view || exporting) return;
+    setExporting(f === "pdf" ? "Building the PDF report…" : "Building the Excel workbook…");
+    try { await perfApi.exportView(view, f); } catch (e) { setError(String((e as Error).message || e)); } finally { setExporting(null); }
   };
+  const smonDeclined = !!declinedFor[sid];
 
-  const scheduleSmon = async () => {
-    if (!window.confirm(`Schedule SMON daily monitoring in ${sid}?\n\nThis creates the /SDF/SMON monitoring job in SAP (a write). `
-      + "It collects a snapshot every 10 seconds for the rest of the day.")) { setSmonDeclined(true); return; }
-    try { const r = await perfApi.scheduleSmon(sid); setSmonMsg(r.message); load(); }
-    catch (e) { setSmonMsg(String((e as Error).message || e)); }
-  };
+
 
   return (
     <main className="sx-wrap px">
@@ -148,15 +161,17 @@ export default function PerfDashboard() {
           {ranges ? <span title={`Oldest day SAP still holds: workload ${ranges.workload_days.at(-1) ?? "none"}, HANA ${ranges.hana_from ?? "none"} · analysis window ${ranges.limit_days} days`}>Analysable from {minDate}</span> : null}
         </span>
         <span className="px-exp">
-          <button className="sx-btn" onClick={() => exportAs("xlsx")} disabled={!view || !!busy} data-testid="px-xlsx">Export Excel</button>
-          <button className="sx-btn sx-btn-primary" onClick={() => exportAs("pdf")} disabled={!view || !!busy} data-testid="px-pdf">Export PDF report</button>
+          <button className="sx-btn" onClick={() => exportAs("xlsx")} disabled={!view || !!exporting} data-testid="px-xlsx">Export Excel</button>
+          <button className="sx-btn sx-btn-primary" onClick={() => exportAs("pdf")} disabled={!view || !!exporting} data-testid="px-pdf">Export PDF report</button>
         </span>
       </div>
 
       {error ? <p className="sx-error" role="alert">{error}</p> : null}
-      {busy ? <p className="sx-busy" aria-live="polite">{busy}</p> : null}
+      {busy || exporting ? <p className="sx-busy" aria-live="polite">{busy ?? exporting}</p> : null}
       {mode === "day" && !dayKnown ? <p className="px-note">SAP keeps no workload or HANA history for {date}; pick a date from {minDate}{ranges?.workload_days.length && ranges.workload_days[0] < (minDate ?? "") ? ` (ST03N workload ends ${ranges.workload_days[0]}, before the ${ranges.limit_days}-day window — check job SAP_COLLECTOR_FOR_PERFMONITOR)` : ""}.</p> : null}
-      {!view && !busy && !error ? <div className="sx-drop"><h3>Pick a system</h3><p>Add an SAP system with its user on the Systems page first.</p></div> : null}
+      {!view && !busy && !error ? (systems.length ? (mode === "day" && !date
+        ? <div className="sx-drop"><h3>Pick a date</h3><p>Choose the day to analyse.</p></div> : null)
+        : <div className="sx-drop"><h3>Pick a system</h3><p>Add an SAP system with its user on the Systems page first.</p></div>) : null}
 
       {view ? (
         <>
@@ -228,9 +243,12 @@ export default function PerfDashboard() {
               <div className="sx-panel px-card">
                 <div className="px-card-h"><h3>Buffers</h3><span>ST02 · worst hit ratio {fmt(view.sap.buffers?.worst_hit, "%")}</span></div>
                 <div className="px-buf">
-                  {(view.sap.buffers?.buffers ?? []).slice(0, 8).map(b => (
-                    <Meter key={b.name} label={b.name} value={b.hit} rating={b.hit == null ? "unknown" : b.hit >= 98 ? "good" : b.hit >= 95 ? "warning" : "serious"}
-                      sub={`${b.swaps} swaps · ${fmt(b.free_pct, "%")} free`} />
+                  {[...(view.sap.buffers?.buffers ?? [])]
+                    // rated buffers first, worst hit ratio first — the ones the KPI is about
+                    .sort((a, b) => Number(!!b.rated) - Number(!!a.rated) || (a.hit ?? 101) - (b.hit ?? 101)).slice(0, 8).map(b => (
+                    <Meter key={b.name} label={b.name} value={b.hit}
+                      rating={b.hit == null || !b.rated ? "unknown" : b.hit >= 98 ? "good" : b.hit >= 95 ? "warning" : "serious"}
+                      sub={`${b.swaps} swaps · ${fmt(b.free_pct, "%")} free${b.rated ? "" : " · not rated"}`} />
                   ))}
                 </div>
               </div>
@@ -259,7 +277,7 @@ export default function PerfDashboard() {
           </section>
 
           <section className="sx-panel px-card px-smon" aria-label="SMON">
-            <div className="px-card-h"><h3>Snapshot monitoring</h3><span>/SDF/SMON</span></div>
+            <div className="px-card-h"><h3>Snapshot monitoring</h3><span>/SDF/{smon?.tool ?? "SMON"}</span></div>
             {smon?.series?.length ? (
               <div className="px-smon-grid">
                 {([["act_dia", "Active dialog WPs"], ["diaq", "Dialog queue"], ["users", "Users"], ["cpu", "CPU %"]] as const).map(([k, n]) => (
@@ -268,20 +286,13 @@ export default function PerfDashboard() {
                     <Spark data={smon.series!.map(p => p[k])} w={220} h={44} color={k === "diaq" ? SERIES.db : SERIES.cpu} /></div>
                 ))}
               </div>
-            ) : smon && !smon.active && !smonDeclined && smon.installed && view.mode === "live" ? (
-              <div className="px-offer" data-testid="px-smon-offer">
-                <p><b>SMON is not running in {view.sid}.</b> {smon.why}. SMON adds 10-second snapshots of work processes, queues and
-                  sessions. Without it, this page uses SAP&apos;s other read-only sources.</p>
-                <div className="sx-actions">
-                  <button className="sx-btn sx-btn-primary" onClick={scheduleSmon} data-testid="px-smon-schedule">Schedule SMON</button>
-                  <button className="sx-btn" onClick={() => setSmonDeclined(true)} data-testid="px-smon-decline">Use read-only sources</button>
-                </div>
-              </div>
-            ) : (
-              <p className="px-empty">{smon?.installed === false ? smon.why : smonDeclined ? "SMON not scheduled — showing the live view from read-only sources." :
-                "No SMON snapshots for this period."}</p>
-            )}
-            {smonMsg ? <p className="px-note">{smonMsg}</p> : null}
+            ) : view.mode === "day" || smon?.installed === false ? (
+              <p className="px-empty">{smon?.installed === false ? (smon.why || "Snapshot monitoring could not be read.") : "No snapshot monitoring data for this day."}</p>
+            ) : null}
+            {view.mode === "live" && smon?.installed !== false ? (
+              <SmonScheduler key={sid} sid={sid} smon={smon} onChanged={() => loadRef.current(true)} declined={smonDeclined}
+                onDecline={() => setDeclinedFor(d => ({ ...d, [sid]: true }))} />
+            ) : null}
           </section>
 
           <h2 className="px-h">SAP HANA database</h2>
@@ -296,15 +307,15 @@ export default function PerfDashboard() {
                 return <PctLines labels={slots.map((_, i) => String(i).padStart(2, "0"))}
                   series={[{ name: "CPU max %", color: SERIES.cpu, data: slots.map(h => h ? h.cpu_max : null) },
                            { name: "Memory used % of limit", color: SERIES.db,
-                             data: slots.map(h => h ? (h.limit_gb ? Math.round(h.mem_max_gb / h.limit_gb * 1000) / 10 : 0) : null) }]} />;
+                             data: slots.map(h => h && h.limit_gb ? Math.round(h.mem_max_gb / h.limit_gb * 1000) / 10 : null) }]} />;
               })() : <p className="px-empty">No HANA load history for this period.</p>}
             </div>
             <div className="sx-panel px-card">
               <div className="px-card-h"><h3>Top SQL statements</h3><span>by total execution time</span></div>
               {view.hana?.top_sql?.length ? (
                 <table className="px-t"><thead><tr><th>Statement</th><th>Exec.</th><th>Avg ms</th><th>Share</th></tr></thead>
-                  <tbody>{view.hana.top_sql.slice(0, 8).map(q => (
-                    <tr key={q.hash}><td><code>{q.statement}</code></td><td>{q.executions.toLocaleString()}</td><td>{fmt(q.avg_ms)}</td>
+                  <tbody>{view.hana.top_sql.slice(0, 8).map((q, i) => (
+                    <tr key={`${q.hash}-${i}`}><td><code>{q.statement}</code></td><td>{q.executions.toLocaleString()}</td><td>{fmt(q.avg_ms)}</td>
                       <td><div className="px-share"><div style={{ width: `${q.share}%`, background: SERIES.db }} /></div>{q.share}%</td></tr>))}
                   </tbody></table>) : <p className="px-empty">{view.mode === "day" ? "Top SQL is shown for the live view (current plan cache)." : "No SQL plan cache data."}</p>}
             </div>

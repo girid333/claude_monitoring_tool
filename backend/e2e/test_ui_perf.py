@@ -70,9 +70,9 @@ def page(browser):
     pg = ctx.new_page()
     pg.errors = []
     pg.on("pageerror", lambda e: pg.errors.append(str(e)))
-    # 501 = SMON scheduling not enabled (expected); 502 = the harness's other registered system (F4H)
+    # 502 = the harness's other registered system (F4H)
     # has no performance data, and the page auto-loads the first system before the test picks AAP.
-    pg.on("console", lambda m: m.type == "error" and "501" not in m.text and "502" not in m.text and pg.errors.append(m.text))
+    pg.on("console", lambda m: m.type == "error" and "502" not in m.text and pg.errors.append(m.text))
     yield pg
     ctx.close()
 
@@ -142,9 +142,20 @@ def test_05_smon_offer_decline_and_schedule(page):
     page.reload()
     page.get_by_test_id("px-sid").select_option("AAP")
     expect(page.get_by_test_id("px-smon-offer")).to_be_visible(timeout=60000)
-    page.once("dialog", lambda d: d.accept())
     page.get_by_test_id("px-smon-schedule").click()
-    expect(page.locator(".px-smon .px-note")).to_contain_text("/SDF/SMON")
+    form = page.get_by_test_id("px-smon-form")
+    expect(form).to_contain_text("This writes to SAP")                 # nothing is sent before the confirm button
+    expect(form).to_contain_text("/SDF/SMON_SCHEDULER")
+    page.get_by_test_id("px-smon-interval").fill("30")
+    page.get_by_test_id("px-smon-confirm").click()
+    expect(page.get_by_test_id("px-smon-result")).to_contain_text("every 30 s", timeout=30000)
+    expect(page.get_by_test_id("px-smon-state")).to_contain_text("is scheduled")
+    page.get_by_test_id("px-smon-sched").screenshot(path=str(SHOTS / "23_performance_smon_scheduled.png"))
+    page.get_by_test_id("px-smon-stop").click()
+    page.get_by_test_id("px-smon-stop-confirm").click()
+    expect(page.get_by_test_id("px-smon-result")).to_contain_text("Deleted 1")
+    expect(page.get_by_test_id("px-smon-state")).to_contain_text("runs today only")
+    assert not page.errors, page.errors
 
 
 def test_07_landscape(page):

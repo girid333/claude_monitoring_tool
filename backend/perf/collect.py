@@ -256,18 +256,33 @@ def workload_day(sap: Sap, sid: str, day: dt.date, notes: list[str]) -> Optional
 
 # ── SMON (/SDF/SMON) ──────────────────────────────────────────────────────
 
+SMON_TABLES = (("/SDF/SMON_HEADER", "SMON"), ("/SDF/MON_HEADER", "MON"))
+
+
+def smon_table(sap: Sap) -> tuple[Optional[str], Optional[str]]:
+    """Snapshot table and tool: /SDF/SMON (ST-PI on 7.40+) or the older /SDF/MON. Cached per connection."""
+    if not hasattr(sap, "_smon_tab"):
+        sap._smon_tab = (None, None)
+        for tab, tool in SMON_TABLES:
+            if sap.read("DD02L", ["TABNAME"], f"TABNAME EQ '{tab}' AND AS4LOCAL EQ 'A'", rowcount=1):
+                sap._smon_tab = (tab, tool)
+                break
+    return sap._smon_tab
+
+
 def smon_status(sap: Sap, now: dt.datetime) -> dict:
-    exists = bool(sap.read("DD02L", ["TABNAME"], "TABNAME EQ '/SDF/SMON_HEADER' AND AS4LOCAL EQ 'A'", rowcount=1))
-    if not exists:
-        return {"installed": False, "active": False, "last": None,
-                "why": "ST-PI component /SDF/SMON is not installed in this system"}
-    rows = sap.read("/SDF/SMON_HEADER", ["DATUM", "TIME"], f"DATUM EQ '{now:%Y%m%d}'", rowcount=5000)
-    last = max((r["DATUM"] + r["TIME"] for r in rows), default="")
+    tab, tool = smon_table(sap)
+    if not tab:
+        return {"installed": False, "active": False, "last": None, "tool": None,
+                "why": "ST-PI snapshot monitoring (/SDF/SMON or /SDF/MON) is not installed in this system"}
+    rows = smon_read(sap, tab, ["DATUM", "TIME"], now.date(), now - dt.timedelta(minutes=20))   # 00:05 still "active"
+    last = max((r["DATUM"] + r["TIME"] for r in rows if r.get("DATUM") == f"{now:%Y%m%d}"
+                or (now - (_smon_dt(r["DATUM"], r["TIME"]) or now)).total_seconds() < 20 * 60), default="")
     last_dt = _smon_dt(last[:8], last[8:]) if last else None
     active = bool(last_dt and (now - last_dt).total_seconds() < 20 * 60)
-    return {"installed": True, "active": active, "last": last_dt.isoformat(sep=" ") if last_dt else None,
-            "why": "" if active else ("No SMON snapshot today — daily monitoring is not scheduled" if not last_dt
-                                      else f"Last SMON snapshot {last_dt:%H:%M} — collection stopped")}
+    return {"installed": True, "active": active, "last": last_dt.isoformat(sep=" ") if last_dt else None, "tool": tool,
+            "why": "" if active else (f"No {tool} snapshot today — daily monitoring is not scheduled" if not last_dt
+                                      else f"Last {tool} snapshot {last_dt:%H:%M} — collection stopped")}
 
 
 def _smon_dt(d: str, t: str) -> Optional[dt.datetime]:
@@ -278,15 +293,27 @@ def _smon_dt(d: str, t: str) -> Optional[dt.datetime]:
         return None
 
 
-def smon_day(sap: Sap, day: dt.date, bucket_min: int = 5) -> list[dict]:
-    """SMON snapshots for one day, all servers, averaged into `bucket_min` buckets."""
-    rows = sap.read("/SDF/SMON_HEADER", SMON_FIELDS, f"DATUM EQ '{day:%Y%m%d}'", rowcount=40000)
-    buckets: dict[str, list[dict]] = defaultdict(list)
+def smon_read(sap: Sap, tab: str, fields: list[str], day: dt.date, since: Optional[dt.datetime] = None) -> list[dict]:
+    """Rows of `day`; with `since` on an earlier day (live window across midnight) that day's tail too."""
+    where = f"DATUM EQ '{day:%Y%m%d}'"
+    if since is not None and since.date() < day:
+        where = f"DATUM EQ '{day:%Y%m%d}' OR ( DATUM EQ '{since:%Y%m%d}' AND TIME GE '{since:%H%M%S}' )"
+    return sap.read(tab, fields, where, rowcount=40000)
+
+
+def smon_day(sap: Sap, day: dt.date, bucket_min: int = 5, since: Optional[dt.datetime] = None) -> list[dict]:
+    """SMON snapshots for one day (or since `since`), all servers, averaged into `bucket_min` buckets."""
+    tab, _ = smon_table(sap)
+    if not tab:
+        return []
+    rows = smon_read(sap, tab, SMON_FIELDS, day, since)
+    has_mem = "FREE_MEM_PERC" in sap.fields(tab)          # /SDF/MON has no free-memory percentage
+    buckets: dict[dt.datetime, list[dict]] = defaultdict(list)
     for r in rows:
         t = _smon_dt(r.get("DATUM", ""), r.get("TIME", ""))
-        if not t:
+        if not t or (since is not None and t < since):
             continue
-        key = t.replace(minute=t.minute - t.minute % bucket_min, second=0).strftime("%H:%M")
+        key = t.replace(minute=t.minute - t.minute % bucket_min, second=0)
         buckets[key].append(r)
     out = []
     for key in sorted(buckets):
@@ -298,8 +325,8 @@ def smon_day(sap: Sap, day: dt.date, bucket_min: int = 5) -> list[dict]:
         # sums across servers of each server's bucket mean; CPU as an average over servers
         tot = lambda f: round(sum(mean(f, v) for v in per_srv.values()), 1)  # noqa: E731
         avg = lambda f: round(sum(mean(f, v) for v in per_srv.values()) / len(per_srv), 1)  # noqa: E731
-        out.append({"time": key, "act_wps": tot("ACT_WPS"), "act_dia": tot("ACT_DIA"),
-                    "cpu": round(100 - avg("IDLE_TOTAL"), 1), "free_mem": avg("FREE_MEM_PERC"),
+        out.append({"time": key.strftime("%H:%M"), "act_wps": tot("ACT_WPS"), "act_dia": tot("ACT_DIA"),
+                    "cpu": round(100 - avg("IDLE_TOTAL"), 1), "free_mem": avg("FREE_MEM_PERC") if has_mem else None,
                     "diaq": tot("DIAQ"), "updq": tot("UPDQ"), "enqq": tot("ENQQ"), "users": tot("USERS"),
                     "sessions": tot("SESSIONS"), "locks": tot("SM12_CNT"), "servers": len(per_srv)})
     return out
@@ -417,14 +444,24 @@ def _f(v) -> Optional[float]:
 GB = 1024 ** 3
 
 
+def _ts_hana(v: str) -> Optional[dt.datetime]:
+    m = re.match(r"(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)", v or "")
+    return dt.datetime(*map(int, m.groups())) if m else None
+
+
 def hana_live(h: HanaViaSm69, notes: list[str]) -> dict:
     out: dict = {}
     lh = _cols(h, "SYS", "M_LOAD_HISTORY_HOST")
     want = [c for c in ("HOST", "TIME", "CPU", "MEMORY_USED", "MEMORY_ALLOCATION_LIMIT", "MEMORY_SIZE",
                         "DISK_USED", "DISK_SIZE", "NETWORK_IN", "NETWORK_OUT") if c in lh]
     if {"HOST", "TIME", "CPU"} <= set(want):
-        hosts = h.table(want, "FROM M_LOAD_HISTORY_HOST WHERE TIME > ADD_SECONDS(CURRENT_TIMESTAMP, -120) "
-                              "ORDER BY TIME DESC, HOST", top=48)
+        # Fixed window: wide rows are read in several column-group queries matched by position, so the
+        # row set must not change between them (a new 10-s sample under a CURRENT_TIMESTAMP window would).
+        mx = h.query("SELECT MAX(TIME) AS T FROM M_LOAD_HISTORY_HOST")
+        t_max = _ts_hana((mx[0].get("T") if mx else "") or "")
+        win = (f"TIME > '{t_max - dt.timedelta(seconds=120):%Y-%m-%d %H:%M:%S}' AND TIME <= '{t_max:%Y-%m-%d %H:%M:%S}.999'"
+               if t_max else "TIME > ADD_SECONDS(CURRENT_TIMESTAMP, -120)")
+        hosts = h.table(want, f"FROM M_LOAD_HISTORY_HOST WHERE {win} ORDER BY TIME DESC, HOST", top=48)
         seen, latest = set(), []
         for r in hosts:
             if r["HOST"] not in seen:
@@ -465,20 +502,28 @@ def hana_live(h: HanaViaSm69, notes: list[str]) -> dict:
 
 
 def top_sql(h: HanaViaSm69, n: int = 10) -> list[dict]:
-    order = "ORDER BY TOTAL_EXECUTION_TIME DESC, STATEMENT_HASH"
+    order = "ORDER BY TOTAL_EXECUTION_TIME DESC,STATEMENT_HASH"
     nums = h.table(["STATEMENT_HASH", "EXECUTION_COUNT", "TOTAL_EXECUTION_TIME", "AVG_EXECUTION_TIME"],
                    f"FROM M_SQL_PLAN_CACHE {order}", top=n)
-    # quotes stripped server-side: hdbsql escapes them (\"), which could push a line past SXPG's 128 chars
-    text = h.query(f"SELECT TOP {n} SUBSTR(REPLACE(TO_NVARCHAR(STATEMENT_STRING), CHAR(34), ''), 1, 90) AS S "
-                   f"FROM M_SQL_PLAN_CACHE {order}")
+    # Text in its own query (it would push the numbers past SXPG's 128-char line), keyed by the hash so
+    # a plan cache that changed between the two calls cannot pair a statement with another's figures.
+    # Quotes are stripped (hdbsql escapes them as \", growing the line); line feeds become blanks
+    # (a raw newline splits the hdbsql row). No ' ' literal: SXPG splits arguments on that blank
+    # (F4H: "Missing ' in argument string") — CHAR(32) instead.
+    text = h.query(f"SELECT TOP {n} LEFT(STATEMENT_HASH,12) K,SUBSTR(REPLACE(REPLACE(TO_NVARCHAR("
+                   f"STATEMENT_STRING),CHAR(34),''),CHAR(10),CHAR(32)),1,80) S FROM M_SQL_PLAN_CACHE {order}")
+    by_hash: dict[str, list[str]] = defaultdict(list)
+    for r in text:
+        by_hash[r.get("K", "")].append(r.get("S", ""))
     tot = sum((_f(r.get("TOTAL_EXECUTION_TIME")) or 0) for r in nums) or 1
     out = []
-    for i, r in enumerate(nums):
+    for r in nums:
         t = _f(r.get("TOTAL_EXECUTION_TIME")) or 0
-        out.append({"hash": r.get("STATEMENT_HASH", "")[:12], "executions": to_int(r.get("EXECUTION_COUNT")),
+        key = (r.get("STATEMENT_HASH") or "")[:12]
+        stmt = by_hash[key].pop(0) if by_hash.get(key) else ""
+        out.append({"hash": key, "executions": to_int(r.get("EXECUTION_COUNT")),
                     "total_s": round(t / 1e6, 1), "avg_ms": round((_f(r.get("AVG_EXECUTION_TIME")) or 0) / 1000, 2),
-                    "share": round(t / tot * 100, 1),
-                    "statement": " ".join((text[i].get("S", "") if i < len(text) else "").split())})
+                    "share": round(t / tot * 100, 1), "statement": " ".join(stmt.split())})
     return out
 
 

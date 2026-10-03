@@ -33,8 +33,10 @@ CALLS: list[str] = []
 STATE = {"hana": True, "sick_error": False, "sapctl": True, "port_closed": False}
 PERF = {"smon": True, "upd": False, "today": True, "tcdet": True, "work": True,
         # D-052b landscape: 3 app servers, HANA scale-out + HSR, cloud metadata, HANA client network trace
-        "multi": False, "hsr_bad": False, "cloud": False, "nettrace": False}      # /perf/... switches; upd off keeps the AHC SM13 check unchanged
+        "multi": False, "hsr_bad": False, "cloud": False, "nettrace": False,
+        "mon_only": False}      # D-052c: only the older /SDF/MON is installed      # /perf/... switches; upd off keeps the AHC SM13 check unchanged
 JOBS: dict = {}          # jobcount -> {"name", "program", "status"}
+SMON_RUNS: list = []     # D-052c: /SDF/SMON_RUN rows the scheduled /SDF/SMON_START created
 SM69 = "ZAHC_HDBSQL"
 
 
@@ -114,20 +116,33 @@ def tables() -> dict:
                           [[comp, "QAS", "D", day_] for day_ in workload_index_days()
                            for comp in swnc_components(day_)]
                           + [["TOTAL", "QAS", "W", d(ago(days=7))], ["prd_PRD_00", "PRD", "D", d(ago(days=60))]]),
-        "DD02L": (["TABNAME", "AS4LOCAL", "TABCLASS"], [["/SDF/SMON_HEADER", "A", "TRANSP"]] if PERF["smon"] else []),
+        "DD02L": (["TABNAME", "AS4LOCAL", "TABCLASS"],
+                  [[("/SDF/MON_HEADER" if PERF["mon_only"] else "/SDF/SMON_HEADER"), "A", "TRANSP"]] if PERF["smon"] else []),
+        # /SDF/MON (older ST-PI): no NETRTT, no FREE_MEM_PERC
+        "/SDF/MON_HEADER": (["DATUM", "TIME", "SERVER", "ACT_WPS", "ACT_DIA", "USR_TOTAL", "SYS_TOTAL", "IDLE_TOTAL",
+                             "DIAQ", "UPDQ", "ENQQ", "USERS", "SESSIONS", "SM12_CNT"],
+                            [r[:8] + r[9:15] for r in smon_rows()] if PERF["smon"] and PERF["mon_only"] else []),
         "/SDF/SMON_HEADER": (["GUID", "DATUM", "TIME", "SERVER", "ACT_WPS", "ACT_DIA", "USR_TOTAL", "SYS_TOTAL",
                               "IDLE_TOTAL", "FREE_MEM_PERC", "DIAQ", "UPDQ", "ENQQ", "USERS", "SESSIONS", "SM12_CNT", "NETRTT"],
                              [["G"] + r[:2] + r[2:] for r in smon_rows()] if PERF["smon"] else []),
         "TSP01": (["RQIDENT", "RQCLIENT", "RQOWNER", "RQCRETIME", "RQERROR", "RQPJSERR", "RQPJHERR", "RQTITLE"],
                   [["4711", "100", "GIRI", ago(hours=2).strftime("%Y%m%d%H%M%S") + "00", "", "00001", "00000", "Bad print"],
                    ["4712", "100", "GIRI", ago(hours=3).strftime("%Y%m%d%H%M%S") + "00", "", "00000", "00000", "Fine"]]),
-        "TBTCO": (["JOBNAME", "SDLUNAME", "STRTDATE", "STRTTIME", "ENDDATE", "ENDTIME", "SDLSTRTDT", "SDLSTRTTM", "STATUS"],
-                  [["Z_NIGHTLY", "BATCHUSR", d(ago(hours=5)), tm(ago(hours=5)), d(ago(hours=5)), tm(ago(hours=5, seconds=-90)),
+        "TBTCO": (["JOBNAME", "SDLUNAME", "STRTDATE", "STRTTIME", "ENDDATE", "ENDTIME", "SDLSTRTDT", "SDLSTRTTM", "STATUS",
+                   "JOBCOUNT", "PERIODIC", "PRDDAYS"],
+                  [[j["name"], "MONITOR", "", "", "", "", j.get("date", ""), j.get("time", ""), j["status"], jc,
+                    j.get("periodic", ""), j.get("prddays", "000")] for jc, j in JOBS.items() if j["name"].startswith("/SDF/")]
+                  + [r + ["", "", "000"] for r in [["Z_NIGHTLY", "BATCHUSR", d(ago(hours=5)), tm(ago(hours=5)), d(ago(hours=5)), tm(ago(hours=5, seconds=-90)),
                     d(ago(hours=5)), tm(ago(hours=5)), "A"],
                    ["Z_LATE", "BATCHUSR", d(ago(hours=6)), tm(ago(hours=6)), d(ago(hours=6)), tm(ago(hours=6)),
                     d(ago(hours=7)), tm(ago(hours=7)), "F"],
                    ["Z_OK", "BATCHUSR", d(ago(hours=8)), tm(ago(hours=8)), d(ago(hours=8)), tm(ago(hours=8)),
-                    d(ago(hours=8)), tm(ago(hours=8)), "F"]]),
+                    d(ago(hours=8)), tm(ago(hours=8)), "F"]]]),
+        "TRDIR": (["NAME", "SUBC"], ([] if PERF["mon_only"] else [["/SDF/SMON_START", "1"]]) + [["/SDF/MON_START", "1"]]),
+        "/SDF/SMON_RUN": (["DESCRIPTION", "ST_DAT", "ST_TIM", "ENDDAT", "ENDTIM", "FREQU"],
+                          [] if PERF["mon_only"] else [list(r) for r in SMON_RUNS]),
+        "/SDF/ANALYSES": (["DESCRIPTION", "ST_DAT", "ST_TIM", "ENDDAT", "ENDTIM", "FREQU"],
+                          [list(r) for r in SMON_RUNS] if PERF["mon_only"] else []),
         "SRT_MMASTER": (["MESSAGE_STATE", "CREATED_AT", "OB_IF_NAME", "IB_IF_NAME", "LOCATION", "ADAPTER_TYPE",
                          "CREATED_BY", "ERROR_COUNTER"], []),
         "SOES": (["SNDDAT", "SNDTIM", "SNDART", "SCDATE", "SCTIME", "DELIVER", "NOT_DELI", "STATUS", "MSGID", "MSGTY", "MSGV1"],
@@ -579,14 +594,43 @@ def xbp(fm: str, body: str) -> str:
     if job is None or job["name"] != g("JOBNAME"):
         return resp(fm, "<RETURN><TYPE>E</TYPE><MESSAGE>Job does not exist</MESSAGE></RETURN>")
     if fm == "BAPI_XBP_JOB_ADD_ABAP_STEP":
-        job["program"] = g("ABAP_PROGRAM_NAME")
-        return resp(fm, RET + "<STEP_NUMBER>1</STEP_NUMBER>")
+        job["program"] = job["program"] or g("ABAP_PROGRAM_NAME")
+        job.setdefault("steps", []).append(g("ABAP_PROGRAM_NAME"))
+        sel = {m.group(1): m.group(2) for m in re.finditer(
+            r"<SELNAME>(\w+)</SELNAME>.*?<LOW>(.*?)</LOW>", g("SELINFO") or "", re.S)}
+        job.setdefault("sel", sel)
+        return resp(fm, RET + f"<STEP_NUMBER>{len(job['steps'])}</STEP_NUMBER>")
     if fm == "BAPI_XBP_JOB_CLOSE":
         job["status"] = "S"
         return resp(fm, RET)
     if fm == "BAPI_XBP_JOB_START_IMMEDIATELY":
+        if job["program"] in ("/SDF/SMON_START", "/SDF/MON_START"):
+            today = sap_now().strftime("%Y%m%d")
+            if any(r[1] == today and "Daily Monitoring" in r[0] for r in SMON_RUNS):
+                job["status"], job["log"] = "A", ["There is an overlapping analysis 'Daily Monitoring' running or scheduled"]
+                return resp(fm, RET)
+            sel = job.get("sel", {})
+            SMON_RUNS.append([f"Daily Monitoring {sap_now():%d.%m.%Y}", today, sel.get("ST_TIM", ""), today,
+                              sel.get("ENDTIM", ""), sel.get("FREQU", "")])
+            job.update(status="F", date=today, time=sel.get("ST_TIM", ""),
+                       log=[f"Analysis 'Daily Monitoring {sap_now():%d.%m.%Y}' has been scheduled"])
+            wd = "/SDF/SMON_WATCHDOG" if job["program"] == "/SDF/SMON_START" else "/SDF/MON_WATCHDOG"
+            JOBS[f"{13563700 + len(JOBS):08d}"] = {"name": wd, "program": wd, "status": "S", "date": today,
+                                                  "periodic": "X"}
+            return resp(fm, RET)
         job["status"] = "F" if job["program"] == "RSICC000" else "A"
         return resp(fm, RET)
+    if fm == "BAPI_XBP_JOB_HEADER_MODIFY":
+        # F4H: without MASK-STARTCOND the start fields are ignored → "Invalid start date"; dates are ISO over SOAP
+        dte, tme = g("SDLSTRTDT"), g("SDLSTRTTM")
+        if "<STARTCOND>X</STARTCOND>" not in body or not re.fullmatch(r"\d{4}-\d\d-\d\d", dte or ""):
+            return resp(fm, "<RETURN><TYPE>E</TYPE><MESSAGE>Invalid start date</MESSAGE></RETURN>")
+        job.update(status="S", date=dte.replace("-", ""), time=(tme or "").replace(":", ""),
+                   periodic=g("PERIODIC"), prddays=f"{int(g('PRDDAYS') or 0):03d}")
+        return resp(fm, RET)
+    if fm == "BAPI_XBP_JOB_JOBLOG_READ":
+        lines = ["Job started", f"Step 001 started (program {job['program']})"] + job.get("log", []) + ["Job finished"]
+        return resp(fm, RET + "<JOB_PROTOCOL>" + items([{"TEXT": t} for t in lines]) + "</JOB_PROTOCOL>")
     if fm == "BAPI_XBP_JOB_STATUS_GET":
         return resp(fm, RET + f"<STATUS>{job['status']}</STATUS>")
     if fm == "BAPI_XBP_JOB_SPOOLLIST_READ":
@@ -627,7 +671,7 @@ def hdbsql(sql: str) -> tuple[list[str], int]:
     top, cols_sql = m.group(1), m.group(2)
     names, rows = view
     rows = rows[: int(top)] if top else rows
-    sub = re.fullmatch(r"SUBSTR\(TO_NVARCHAR\(([\w.]+)\), (\d+), (\d+)\) AS P", cols_sql.strip())
+    sub = re.fullmatch(r"SUBSTR\(TO_NVARCHAR\(([\w.]+)\), ?(\d+), ?(\d+)\) (?:AS )?P", cols_sql.strip())
     if sub:
         col, k, n = sub.group(1), int(sub.group(2)), int(sub.group(3))
         i = _index(names, col)
@@ -646,6 +690,8 @@ def hana_perf(sql: str):
     if "VIEW_COLUMNS" in sql and "M_LOAD_HISTORY_HOST" in sql:
         return ["|COLUMN_NAME|"] + [f'|"{c}"|' for c in ("TIME", "HOST", "CPU", "MEMORY_USED",
                                                            "MEMORY_ALLOCATION_LIMIT", "DISK_USED", "DISK_SIZE")]
+    if "M_LOAD_HISTORY_HOST" in sql and "MAX(TIME)" in sql:
+        return ["|T|", f'|"{n:%Y-%m-%d %H:%M:%S}.123000000"|']
     if "M_LOAD_HISTORY_HOST" in sql and "MIN(TIME)" in sql:
         return ["|D|", f'|"{(n - dt.timedelta(days=30)).date()}"|']
     if "M_LOAD_HISTORY_HOST" in sql and "GROUP BY HOST, HOUR(TIME)" in sql:
@@ -695,12 +741,16 @@ def hana_perf(sql: str):
         return ["|N|", "|3|"]
     if "FROM M_SAVEPOINTS" in sql:
         return ["|A|M|", "|850000|4200000|"]
-    if "FROM M_SQL_PLAN_CACHE" in sql and "AS S" in sql:
+    if "FROM M_SQL_PLAN_CACHE" in sql and " S FROM" in sql:
         strip = "REPLACE(" in sql
-        fix = lambda s: (s.replace('"', "") if strip else s)[:90].replace('"', '\\"')  # noqa: E731
-        return ["|S|"] + [f'|"{fix(s)}"|' for s in (
-            'SELECT * FROM "VBAK" WHERE "MANDT" = ? AND "ERDAT" > ? -- \"hot\" statement from VA01 reporting run',
-            'UPDATE "NRIV" SET "NRLEVEL" = ? WHERE "CLIENT" = ? AND "OBJECT" = ?')]
+        fix = lambda s: (s.replace('"', "") if strip else s)[:80].replace('"', '\\"')  # noqa: E731
+        # text rows deliberately in the OTHER order than the figures (plan cache moved between the calls)
+        stmts = {"a1b2c3d4e5f6": 'SELECT * FROM "VBAK" WHERE "MANDT" = ? AND "ERDAT" > ? -- \"hot\" statement from VA01 reporting run',
+                 "ffeeddccbbaa": 'UPDATE "NRIV" SET "NRLEVEL" = ?\nWHERE "CLIENT" = ? AND "OBJECT" = ?'}
+        if "CHAR(10)" in sql:
+            stmts = {k: v.replace("\n", " ") for k, v in stmts.items()}
+        out = ["|K|S|"] + [f'|"{k}"|"{fix(v)}"|' for k, v in reversed(list(stmts.items()))]
+        return [seg for line in out for seg in line.split("\n")]      # a raw newline splits the protocol line
     if "FROM M_SQL_PLAN_CACHE" in sql:
         return ["|STATEMENT_HASH|EXECUTION_COUNT|TOTAL_EXECUTION_TIME|AVG_EXECUTION_TIME|",
                 '|"a1b2c3d4e5f60718293a4b5c6d7e8f90"|1200|900000000|750000|',
@@ -737,7 +787,9 @@ class H(BaseHTTPRequestHandler):
             STATE["sapctl"] = True
             STATE["port_closed"] = False
             PERF.update(smon=True, upd=False, today=True, tcdet=True, work=True, multi=False, hsr_bad=False, cloud=False,
-                        nettrace=False)
+                        nettrace=False, mon_only=False)
+            JOBS.clear()
+            SMON_RUNS.clear()
             return self._send("ok", ctype="text/plain")
         if self.path.startswith("/jobs"):
             return self._send(json.dumps(JOBS), ctype="application/json")

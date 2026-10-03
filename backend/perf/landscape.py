@@ -98,7 +98,13 @@ SMON_SRV_FIELDS = ["DATUM", "TIME", "SERVER", "ACT_DIA", "IDLE_TOTAL", "FREE_MEM
 def smon_servers(sap: Sap, day: dt.date, since: Optional[dt.datetime] = None) -> dict[str, dict]:
     """Per SMON server: CPU, free memory, dialog queue, users and NETRTT (µs) — the newest snapshot
     plus averages over the window (`since` → live last hour, None → whole day)."""
-    rows = sap.read("/SDF/SMON_HEADER", SMON_SRV_FIELDS, f"DATUM EQ '{day:%Y%m%d}'", rowcount=40000)
+    from .collect import smon_table
+    tab, _ = smon_table(sap)
+    if not tab:
+        return {}
+    from .collect import smon_read
+    rows = smon_read(sap, tab, SMON_SRV_FIELDS, day, since)          # live hour may start yesterday
+    have = set(sap.fields(tab))                  # /SDF/MON: no NETRTT, no FREE_MEM_PERC
     by: dict[str, list[tuple[dt.datetime, dict]]] = defaultdict(list)
     for r in rows:
         t = _smon_dt(r.get("DATUM", ""), r.get("TIME", ""))
@@ -108,11 +114,12 @@ def smon_servers(sap: Sap, day: dt.date, since: Optional[dt.datetime] = None) ->
     for srv, rs in by.items():
         rs.sort(key=lambda x: x[0])
         last = rs[-1][1]
-        rtts = [to_float(r.get("NETRTT")) for _, r in rs if to_float(r.get("NETRTT")) > 0]
+        rtts = [to_float(r.get("NETRTT")) for _, r in rs if to_float(r.get("NETRTT")) > 0] if "NETRTT" in have else []
         cpus = [100 - to_float(r.get("IDLE_TOTAL")) for _, r in rs]
         out[srv] = {"last": rs[-1][0].strftime("%H:%M"), "samples": len(rs),
                     "cpu": round(100 - to_float(last.get("IDLE_TOTAL")), 1), "cpu_avg": round(sum(cpus) / len(cpus), 1),
-                    "cpu_max": round(max(cpus), 1), "free_mem": to_float(last.get("FREE_MEM_PERC")),
+                    "cpu_max": round(max(cpus), 1),
+                    "free_mem": to_float(last.get("FREE_MEM_PERC")) if "FREE_MEM_PERC" in have else None,
                     "diaq": to_int(last.get("DIAQ")), "diaq_max": max(to_int(r.get("DIAQ")) for _, r in rs),
                     "users": to_int(last.get("USERS")), "act_dia": to_int(last.get("ACT_DIA")),
                     "rtt_us": round(sum(rtts) / len(rtts)) if rtts else None,

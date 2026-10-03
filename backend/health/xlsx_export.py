@@ -200,6 +200,8 @@ def spreadsheetml_to_xlsx(data: bytes) -> bytes:
                 v = _value(cell_el.find(_q("Data")))
                 if v not in (None, ""):
                     cell.value = v
+                    if cell.data_type == "f":      # SAP text starting with "=" stays text (no formula injection)
+                        cell.data_type = "s"
                 st = styles.get(_a(cell_el, "StyleID") or "") or default
                 if st:
                     st.apply(cell)

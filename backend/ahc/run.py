@@ -28,8 +28,7 @@ def pull(client: RfcSoapClient, sap_client: str, now: Optional[dt.datetime] = No
         # SAP's clock, not the container's: windows like "last 24 hours" must
         # line up with the system's own timestamps (F4H runs UTC+5:30 while the
         # container runs UTC — a 5.5 h skew silently emptied SM21).
-        tz = int((info.get("RFCTZONE") or "0").strip() or 0)
-        now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(seconds=tz)
+        now = sap.sap_now(info)
     x = Ctx(sap=sap, sid=sid, client=sap_client, now=now)
     x.hana = HanaViaSm69(sap, hdbsql_command)
     tabs, verdicts = collect(x, progress)

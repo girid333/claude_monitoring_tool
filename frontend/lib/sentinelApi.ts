@@ -99,7 +99,14 @@ export interface SmonPoint {
   time: string; act_wps: number; act_dia: number; cpu: number; free_mem: number; diaq: number;
   updq: number; enqq: number; users: number; sessions: number; locks: number; servers: number;
 }
+export interface SmonRun { description: string; start: string; end: string; interval_s: number; running: boolean }
+export interface SmonSchedule {
+  tool: "SMON" | "MON" | null; can_schedule: boolean; why: string; daily_scheduled?: boolean; next_start?: string | null;
+  daily_jobs?: { jobcount: string; status: string; user: string }[]; today?: SmonRun | null;
+  other_runs_today?: SmonRun[]; today_job?: boolean; watchdog?: boolean; job_name?: string;
+}
 export interface Smon {
+  tool?: "SMON" | "MON" | null;
   installed: boolean; active: boolean; last: string | null; why?: string;
   series?: SmonPoint[]; latest?: SmonPoint | null;
 }
@@ -146,8 +153,9 @@ export interface SapLive {
   memory: { phys_mb: number | null; free_mb: number | null; free_pct: number | null; swap_used_pct: number | null };
   users: number | null; sessions: number | null; locks: number | null;
   updates_pending: number | null; update_errors: number | null; jobs_running: number | null;
-  buffers: { buffers: { name: string; hit: number | null; swaps: number; free_pct: number | null; requests: number }[];
-             swaps: number; worst_hit: number | null } | null;
+  buffers: { buffers: { name: string; hit: number | null; swaps: number; free_pct: number | null; requests: number;
+                        rated?: boolean }[];
+             swaps: number; worst_hit: number | null; worst_name?: string | null } | null;
 }
 export interface PerfView {
   mode: "live" | "day"; date?: string; sid: string; client: string; release: string; db: string; host: string;
@@ -167,8 +175,19 @@ export const perfApi = {
   day: (sid: string, date: string) =>
     fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/day?date=${date}`).then(r => asJson<PerfView>(r)),
   ranges: (sid: string) => fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/ranges`).then(r => asJson<PerfRanges>(r)),
-  scheduleSmon: (sid: string) => fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/smon/schedule`, { method: "POST" })
-    .then(r => asJson<{ ok: boolean; message: string }>(r)),
+  smonStatus: (sid: string) => fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/smon/schedule`)
+    .then(r => asJson<SmonSchedule>(r)),
+  /** WRITES to SAP — call only after the user confirmed. */
+  scheduleSmon: (sid: string, interval_s: number, keep_days: number) =>
+    fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/smon/schedule`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true, interval_s, keep_days }),
+    }).then(r => asJson<{ tool: string; done: string[]; messages: string[]; status: SmonSchedule }>(r)),
+  /** WRITES to SAP — deletes the future daily scheduler jobs. */
+  unscheduleSmon: (sid: string) =>
+    fetch(`${apiBase()}/api/perf/${encodeURIComponent(sid)}/smon/unschedule`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+    }).then(r => asJson<{ tool: string; deleted: number; note: string; status: SmonSchedule }>(r)),
   /** Builds the file from the exact view on screen and saves it. */
   exportView: async (view: PerfView, format: "xlsx" | "pdf") => {
     const r = await fetch(`${apiBase()}/api/perf/export?format=${format}`, {

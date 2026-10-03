@@ -156,6 +156,8 @@ def parse_response(xml_bytes: bytes, function: str) -> dict[str, Any]:
         name = _localname(child.tag)
         if name == "Fault":
             parsed = _parse_element(child)
+            if not isinstance(parsed, dict):          # <Fault>text</Fault> without children
+                parsed = {"faultstring": str(parsed)}
             fault = parsed.get("faultstring") or parsed.get("faultcode") or str(parsed)
             raise RfcSoapError(
                 f"{function}: SAP returned a SOAP fault — {fault}",

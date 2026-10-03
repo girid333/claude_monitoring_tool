@@ -65,8 +65,7 @@ RECOMMEND = {
 
 def system_now(sap: Sap) -> tuple[dict, dt.datetime]:
     info = sap.system_info()
-    tz = int((info.get("RFCTZONE") or "0").strip() or 0)
-    return info, dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(seconds=tz)
+    return info, sap.sap_now(info)
 
 
 def _hana(sap: Sap, notes: list[str]) -> Optional[HanaViaSm69]:
@@ -79,8 +78,9 @@ def _hana(sap: Sap, notes: list[str]) -> Optional[HanaViaSm69]:
 
 def _last24(sap: Sap, sid: str, now: dt.datetime, notes: list[str]) -> tuple[Optional[dict], list[dict]]:
     """Today's workload plus the last 24 hours of the hourly profile (today + yesterday)."""
-    today = C.workload_day(sap, sid, now.date(), notes)
-    yest = C.workload_day(sap, sid, now.date() - dt.timedelta(days=1), notes)
+    today = C._safe(lambda: C.workload_day(sap, sid, now.date(), notes), notes, "ST03N today", None)
+    yest = C._safe(lambda: C.workload_day(sap, sid, now.date() - dt.timedelta(days=1), notes), notes,
+                   "ST03N yesterday", None)
     hours = []
     for src, day in ((yest, now.date() - dt.timedelta(days=1)), (today, now.date())):
         for hrow in (src or {}).get("hourly", []):
@@ -254,7 +254,8 @@ def live(client: RfcSoapClient, sap_client: str) -> dict:
                      + " — check that job SAP_COLLECTOR_FOR_PERFMONITOR runs hourly (SM37).")
     smon = C._safe(lambda: C.smon_status(sap, now), notes, "SMON", {"installed": False, "active": False})
     if smon.get("active"):
-        series = C._safe(lambda: C.smon_day(sap, now.date()), notes, "SMON series", [])
+        series = C._safe(lambda: C.smon_day(sap, now.date(), since=now - dt.timedelta(hours=8)), notes,
+                         "SMON series", [])
         smon["series"] = series[-96:]                       # last 8 h at 5-min buckets
         smon["latest"] = series[-1] if series else None
     h = _hana(sap, notes)
@@ -297,7 +298,7 @@ def day(client: RfcSoapClient, sap_client: str, date: dt.date) -> dict:
     notes: list[str] = []
     info, now = system_now(sap)
     sid = (info.get("RFCSYSID") or "").strip() or "?"
-    work = C.workload_day(sap, sid, date, notes)
+    work = C._safe(lambda: C.workload_day(sap, sid, date, notes), notes, "ST03N", None)
     smon_series: list = []
     smon = C._safe(lambda: C.smon_status(sap, now), notes, "SMON", {"installed": False})
     if smon.get("installed"):

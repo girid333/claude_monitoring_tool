@@ -84,6 +84,8 @@ def _split(line: str) -> list[str]:
 def sxpg_safe(sql: str) -> str:
     """SXPG mangles %word% in parameters (F4H: LIKE '%cloud%' reached HANA as a bare CLOUD
     column; a single % is fine). Refuse rather than send something else than written."""
+    if re.search(r"'\s+'", sql):
+        raise ValueError("SQL contains a blank-only literal ' ' — SXPG splits on it; use CHAR(32)")
     if re.search(r"%[A-Za-z_]\w*%", sql):
         raise ValueError("SQL contains %name% — SXPG would substitute it; use LOCATE() instead of LIKE '%x%'")
     return sxpg_quotes(sql)
@@ -181,7 +183,7 @@ class HanaViaSm69:
 
     def _groups(self, cols: list[str], head: str, source: str) -> list[list[dict]]:
         sql = f"{head}{', '.join(cols)} {source}"
-        if len(sql) <= MAX_SQL:
+        if len(sxpg_safe(sql)) <= MAX_SQL:          # measured as sent (quote spacing adds characters)
             try:
                 return [self.query(sql)]
             except Truncated:
@@ -196,7 +198,7 @@ class HanaViaSm69:
         name = col.split(".")[-1]
         rows: list[str] = []
         for k in range(1, 20 * CHUNK, CHUNK):
-            part = self.query(f"{head}SUBSTR(TO_NVARCHAR({col}), {k}, {CHUNK}) AS P {source}")
+            part = self.query(f"{head}SUBSTR(TO_NVARCHAR({col}),{k},{CHUNK}) P {source}")   # compact: SXPG's 225
             vals = [r.get("P", "") for r in part]
             rows = rows or [""] * len(vals)
             for i, v in enumerate(vals[: len(rows)]):

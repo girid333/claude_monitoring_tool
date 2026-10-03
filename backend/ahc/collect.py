@@ -202,7 +202,8 @@ def c_sm21(x: Ctx) -> Result:
     rows, high, parent = [], 0, None
     entries.sort(key=lambda ie: ie[1].get("SLGDATTIM", ""))
     for inst, e in entries:
-        kind, mid = e.get("SLGTYPE", " ")[0], e.get("SLGTYPE", "    ")[1:4]
+        typ = (e.get("SLGTYPE") or " ").ljust(4)          # an empty SLGTYPE must not drop the whole SM21 tab
+        kind, mid = typ[0], typ[1:4]
         when = stamp(e.get("SLGDATTIM", ""))
         proc = e.get("SLGPROC", "")
         wp = proc[5:10] if proc[5:10].isdigit() else ""
@@ -326,8 +327,12 @@ def c_srt_moni(x: Ctx) -> Result:
                                      "LOCATION", "ADAPTER_TYPE", "CREATED_BY", "ERROR_COUNTER"],
                      "ERROR_COUNTER NE '000'")
     rows = []
+    # CREATED_AT is a TIMESTAMPL — UTC by ABAP convention (F4H DD03L); shift to SAP local time
+    utc_off = dt.timedelta(minutes=round((x.now - dt.datetime.now(dt.timezone.utc).replace(tzinfo=None))
+                                         .total_seconds() / 60))
     for r in raw:
         when = stamp(r["CREATED_AT"])
+        when = when + utc_off if when else None
         if when and when >= x.since:
             rows.append([r["MESSAGE_STATE"], dot(when), hms(when), "", r["OB_IF_NAME"], "", r["IB_IF_NAME"],
                          "", f"{to_int(r['ERROR_COUNTER'])} error(s)", r["LOCATION"], r["ADAPTER_TYPE"],
@@ -347,10 +352,17 @@ def _users(x: Ctx) -> list[dict]:
     return as_rows(x.sap.call("TH_USER_LIST", USRLIST=[]).get("USRLIST"))
 
 
+def _seen(x: Ctx, zeit: str) -> str:
+    """TH_USER_LIST gives only the time of the last step: a time later than now was yesterday."""
+    z = re.sub(r"\D", "", zeit or "").ljust(6, "0")[:6]
+    day = x.now.date() if z <= f"{x.now:%H%M%S}" else x.now.date() - dt.timedelta(days=1)
+    return f"{day:%d.%m.%Y} {z[:2]}:{z[2:4]}:{z[4:6]}"
+
+
 def c_al08(x: Ctx, users: list[dict]) -> Result:
     inst = x.central
     rows = [[inst, u.get("MANDT", ""), u.get("BNAME", ""), u.get("TERM", ""), u.get("TCODE", ""),
-             f"{x.now:%d.%m.%Y} {u.get('ZEIT', '')[:2]}:{u.get('ZEIT', '')[2:4]}:{u.get('ZEIT', '')[4:6]}",
+             _seen(x, u.get("ZEIT", "")),
              u.get("EXTMODI", ""), "", _usr_type(u), "", "", ""] for u in users]
     abap = sum(to_int(u.get("EXTMODI")) for u in users)
     note = "" if len(x.servers) <= 1 else f" (instance {inst} only; TH_USER_LIST is per instance)"
@@ -360,7 +372,7 @@ def c_al08(x: Ctx, users: list[dict]) -> Result:
 
 def c_sm04(x: Ctx, users: list[dict]) -> Result:
     rows = [[u.get("MANDT", ""), u.get("BNAME", ""), u.get("TERM", ""), u.get("TCODE", ""),
-             f"{x.now:%d.%m.%Y} {u.get('ZEIT', '')[:2]}:{u.get('ZEIT', '')[2:4]}:{u.get('ZEIT', '')[4:6]}",
+             _seen(x, u.get("ZEIT", "")),
              _usr_type(u), u.get("EXTMODI", ""), "", "", "", ""] for u in users]
     v = Verdict(None, f"{len(rows)} user session(s) listed; session priority is not exposed by "
                       "TH_USER_LIST, so high-priority sessions cannot be checked over SOAP RFC")
@@ -550,10 +562,14 @@ def c_st06(x: Ctx) -> Result:
         for cat, items in (("CPU", cpu_rows), ("Memory", mem_rows)):
             for i, (d, val, unit) in enumerate(items):
                 rows.append([s["name"], cat if i == 0 else "", d, val, unit])
+        if str(cpu.get("IDLE_TOTAL") or "").strip() == "":
+            continue                     # no OS collector data: never a false "OK"
         idle = to_int(cpu.get("IDLE_TOTAL"), 100)
         worst = min(worst, idle) if worst is not None else idle
-    v = Verdict(worst is None or worst >= 20, "OK" if worst is None or worst >= 20
-                else f"CPU utilization at {100 - worst}%. Check ST06 tab")
+    if worst is None:
+        v = Verdict(None, "Not collected: GET_CPU_ALL returned no CPU data (OS collector saposcol / sapstartsrv)")
+    else:
+        v = Verdict(worst >= 20, "OK" if worst >= 20 else f"CPU utilization at {100 - worst}%. Check ST06 tab")
     return [Block(cols("ST06"), rows, "ST06", f"{x.sid} CPU and Memory Utilization")], v
 
 
@@ -842,14 +858,23 @@ def c_rfc_con(x: Ctx) -> Result:
              if not any(fnmatch.fnmatchcase(d["RFCDEST"], p) for p in skip)]
     docs = {d["RFCDEST"]: d.get("RFCDOC1", "") for d in x.sap.read("RFCDOC", ["RFCDEST", "RFCDOC1"], "RFCLANG EQ 'E'")}
     attrib = {d["RFCDEST"]: d for d in x.sap.read("RFCATTRIB", ["RFCDEST", "CUNAME", "CUDATE", "MUNAME", "MUDATE"])}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {d["RFCDEST"]: pool.submit(_rfc_test, x, d["RFCDEST"], timeout_s) for d in dests}
-        results = {}
-        for name, f in futs.items():
-            try:
-                results[name] = f.result(timeout=timeout_s + 15)
-            except Exception as exc:  # noqa: BLE001  (belt and braces: never let one destination stall the pull)
-                results[name] = ("failed", f"Failed: {type(exc).__name__}", "")
+    # Not "with ThreadPoolExecutor": leaving the block waits for every thread, so a destination that
+    # keeps trickling bytes (httpx's timeout is per read, not per call) would stall the pull. One overall
+    # deadline instead; whatever has not answered by then is a failed test and its thread is abandoned.
+    import time as _time
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futs = {d["RFCDEST"]: pool.submit(_rfc_test, x, d["RFCDEST"], timeout_s) for d in dests}
+    deadline = _time.monotonic() + (len(dests) // workers + 1) * (timeout_s + 5) + 15
+    results = {}
+    for name, f in futs.items():
+        try:
+            results[name] = f.result(timeout=max(0.0, deadline - _time.monotonic()))
+        except TimeoutError:
+            f.cancel()
+            results[name] = ("failed", f"Failed: no answer within {timeout_s:g} s — connection abandoned", "")
+        except Exception as exc:  # noqa: BLE001  (belt and braces: never let one destination stall the pull)
+            results[name] = ("failed", f"Failed: {type(exc).__name__}", "")
+    pool.shutdown(wait=False, cancel_futures=True)
     rows, styles, failed, ok, untestable = [], {}, [], 0, 0
     order = {"failed": 0, "ok": 1, "untestable": 2}
     for d in sorted(dests, key=lambda d: (order[results[d["RFCDEST"]][0]], d["RFCTYPE"], d["RFCDEST"])):
@@ -970,8 +995,10 @@ def c_db12(x: Ctx) -> Result:
     # One row per backup file, newest data backup first — as SAP's DB12 export.
     rs = x.hana.table(["C.SYS_START_TIME", "C.SYS_END_TIME", "C.STATE_NAME", "C.MESSAGE", "F.SOURCE_ID",
                        "F.SOURCE_TYPE_NAME", "F.HOST", "F.SERVICE_TYPE_NAME", "F.DESTINATION_PATH", "F.BACKUP_SIZE"],
+                      # kept short: a long DESTINATION_PATH is read in SUBSTR chunks, and that query
+                      # (column expression + this source) must stay within SXPG's 225 characters
                       "FROM M_BACKUP_CATALOG C JOIN M_BACKUP_CATALOG_FILES F ON C.ENTRY_ID=F.ENTRY_ID "
-                      "WHERE C.ENTRY_TYPE_NAME='complete data backup' ORDER BY C.ENTRY_ID DESC, F.SOURCE_ID",
+                      "WHERE C.ENTRY_TYPE_NAME LIKE 'complete d%' ORDER BY C.ENTRY_ID DESC,SOURCE_ID",
                       top=10)
     rows = []
     for r in rs:

@@ -215,6 +215,8 @@ def test_hana_live_kpis_and_sql_limits(monkeypatch):
     assert kpi(v, "hana_savepoint")["value"] == 4.2
     sql = v["hana"]["top_sql"]
     assert sql[0]["share"] == 75.0 and '"' not in sql[0]["statement"] and sql[0]["statement"].startswith("SELECT * FROM VBAK")
+    # text matched by hash although the text query returned the rows in another order; newline kept no row
+    assert sql[1]["statement"] == "UPDATE NRIV SET NRLEVEL = ? WHERE CLIENT = ? AND OBJECT = ?"
     assert sent and all(len(s) <= MAX_SQL and not s.startswith('"') for s in sent)
     assert not any('"' in s for s in sent)                       # SXPG must never see a double quote
     assert not [n for n in v["notes"] if not n.startswith("Cloud placement")], v["notes"]   # ZAHC_CLOUDMETA is optional
@@ -312,5 +314,5 @@ def test_api_endpoints(api):
     r = api.get("/api/perf/BAD/live")
     assert r.status_code == 502 and "BAD" in r.json()["detail"]
     assert api.get("/api/perf/NOPE/live").status_code == 404
-    s = api.post("/api/perf/QAS/smon/schedule")
-    assert s.status_code == 501 and "/SDF/SMON" in s.json()["detail"]
+    s = api.post("/api/perf/QAS/smon/schedule")                     # a write needs {"confirm": true}
+    assert s.status_code == 400 and "confirm" in s.json()["detail"]

@@ -35,7 +35,7 @@ def _us(v) -> str:
 
 def _where(c: dict) -> str:
     c = c or {}
-    if c.get("error"):
+    if c.get("error") or c.get("provider") == "none":
         return ""
     return " · ".join(x for x in (c.get("provider"), c.get("zone"), c.get("vm_size"),
                                   f"PG {c['placement_group']}" if c.get("placement_group") else "") if x)
@@ -106,6 +106,7 @@ _BOX = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 def _sheet(wb: Workbook, name: str, title: str, header: list[str], rows: list[list], widths: Optional[list[int]] = None):
     ws = wb.create_sheet(name[:31])
     ws["A1"] = title
+    ws["A1"].data_type = "s"
     ws["A1"].font = Font(name="Arial", bold=True, size=13)
     ws.append([])
     ws.append(header)
@@ -117,6 +118,8 @@ def _sheet(wb: Workbook, name: str, title: str, header: list[str], rows: list[li
     for row in ws.iter_rows(min_row=4, max_row=ws.max_row):
         for c in row:
             c.font, c.border = _B, _BOX
+            if c.data_type == "f":         # SAP text such as "=…" must stay text, never become a formula
+                c.data_type = "s"
     for i, w in enumerate(widths or [18] * len(header), 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A4"
@@ -281,7 +284,7 @@ def to_pdf(d: dict) -> bytes:
     P = ParagraphStyle("p", parent=ss["BodyText"], fontName="Helvetica", fontSize=8.5, leading=11)
     S = ParagraphStyle("s", parent=P, fontSize=7.5, leading=9.5, textColor=hexc("4B5563"))
     o = d.get("overall") or {}
-    rating = o.get("rating", "unknown")
+    rating = o.get("rating") if o.get("rating") in STATUS else "unknown"
     story = []
 
     def table(data, widths, header=True, status_col=None):

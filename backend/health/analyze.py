@@ -258,7 +258,8 @@ def a_smlg(sh: Sheet, c: Ctx, base: dict) -> dict:
 
 
 _PSE = re.compile(r"^(\S.*?)\s{3,}([A-Z]{4}) (\S+)\s*$")
-_CERT = re.compile(r"^\s*(?:\d+\s*=\s*)?((?:CN|OU|O|EMAIL|C|L)=.*?)\s{2,}(\d{2}\.\d{2}\.\d{4})\s*$")
+# Any "attr=" subject: rfc4514 strings may start with ST=, DC=, STREET= or a dotted OID (emailAddress → 1.2.840…)
+_CERT = re.compile(r"^\s*(?:\d+\s*=\s*)?((?:[A-Za-z][\w-]*|\d+(?:\.\d+)+)=.*?)\s{2,}(\d{2}\.\d{2}\.\d{4})\s*$")
 
 
 def a_cert(sh: Sheet, c: Ctx, base: dict) -> dict:
@@ -311,6 +312,10 @@ def a_cert(sh: Sheet, c: Ctx, base: dict) -> dict:
                   "All are trusted partner certificates: import the partner's renewed "
                   "certificate (or its new CA) into the same PSE. "))
         tri = "act"
+    elif not rows and base.get("sap_status") == "not_ok":
+        # nothing parsed but SAP itself said Not OK: never turn that into a green check
+        head, rec, tri = "SAP reports expiring certificates, but none could be read from the tab.", \
+            "Open STRUST and check the certificates listed in the CERT tab.", "review"
     else:
         head, rec, tri = f"No certificate expires within {horizon} days.", None, "ok"
     chart_items = [BarItem(label=cn(x["subject"]), value=max(x["days"], 0),

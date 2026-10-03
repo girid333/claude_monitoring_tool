@@ -42,6 +42,7 @@ JOB_FMS = {
     "BAPI_XMI_LOGON", "BAPI_XMI_LOGOFF", "BAPI_XBP_JOB_OPEN", "BAPI_XBP_JOB_ADD_ABAP_STEP",
     "BAPI_XBP_JOB_CLOSE", "BAPI_XBP_JOB_START_IMMEDIATELY", "BAPI_XBP_JOB_STATUS_GET",
     "BAPI_XBP_JOB_SPOOLLIST_READ", "BAPI_XBP_JOB_JOBLOG_READ", "BAPI_XBP_JOB_DELETE",
+    "BAPI_XBP_JOB_HEADER_MODIFY",          # D-052c: periodic start of the SMON daily scheduler job
 }
 
 
@@ -93,16 +94,35 @@ class Sap:
         r = self.call("RFC_READ_TABLE", QUERY_TABLE=table, DELIMITER="|", ROWCOUNT=rowcount,
                       FIELDS=[{"FIELDNAME": f} for f in want], DATA=[],
                       OPTIONS=[{"TEXT": t} for t in option_lines(where)])
-        names = [f.get("FIELDNAME", "").strip() for f in as_rows(r.get("FIELDS"))]
+        fdefs = as_rows(r.get("FIELDS"))
+        names = [f.get("FIELDNAME", "").strip() for f in fdefs]
+        # A "|" inside a value splits it: give the surplus pieces back to the widest text field (the one
+        # free text lives in — MTEXT, JOBNAME, RQTITLE…). OFFSETs can't be used: F4H returns numeric
+        # fields narrower than their LENGTH (TSP01-RQIDENT), so positions drift.
+        lens = [int(f.get("LENGTH") or 0) if (f.get("TYPE") or "C").strip() in ("C", "") else -1 for f in fdefs]
+        widest = max(range(len(names)), key=lambda i: lens[i]) if names else 0
         out = []
         for d in as_rows(r.get("DATA")):
             vals = (d.get("WA", "") if isinstance(d, dict) else str(d)).split("|")
+            extra = len(vals) - len(names)
+            if extra > 0 and names:
+                vals = vals[:widest] + ["|".join(vals[widest:widest + extra + 1])] + vals[widest + extra + 1:]
             row = {n: (vals[i].strip() if i < len(vals) else "") for i, n in enumerate(names)}
             if keep_missing:
                 for f in fields:
                     row.setdefault(f, "")
             out.append(row)
         return out
+
+    def sap_now(self, info: Optional[dict] = None):
+        """SAP's local time. RFCTZONE is SY-TZONE — the UTC offset WITHOUT daylight saving; RFCDAYST
+        (SY-DAYST) = 'X' while DST is on, which adds one hour (F4H, IST: no DST)."""
+        import datetime as dt
+        info = info if info is not None else self.system_info()
+        tz = int(str(info.get("RFCTZONE") or "0").strip() or 0)
+        if str(info.get("RFCDAYST") or "").strip().upper() == "X":
+            tz += 3600
+        return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(seconds=tz)
 
     def system_info(self) -> dict:
         info = self.call("RFC_SYSTEM_INFO").get("RFCSI_EXPORT") or {}

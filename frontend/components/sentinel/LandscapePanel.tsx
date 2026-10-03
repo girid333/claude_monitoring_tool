@@ -13,7 +13,7 @@ const pct = (v: number | null | undefined) => v == null ? "–" : `${Math.round(
 const HSR_RATING: Record<string, Rating> = { ACTIVE: "good", SYNCING: "warning", INITIALIZING: "warning", UNKNOWN: "serious", ERROR: "critical" };
 
 function Where({ c }: { c?: CloudMeta }) {
-  if (!c || (!c.zone && !c.provider)) return null;
+  if (!c || c.error || c.provider === "none" || (!c.zone && !c.provider)) return null;   // on-prem / no metadata
   return <span className="ls-where">{[c.provider, c.zone, c.vm_size].filter(Boolean).join(" · ")}
     {c.placement_group ? <em title="Placement group">PG {c.placement_group}</em> : null}</span>;
 }
@@ -31,7 +31,7 @@ function LatencyBars({ app }: { app: Landscape["app"] }) {
   const t = useTip();
   const rows = app.servers.filter(s => s.latency_us != null).sort((a, b) => (a.latency_rank ?? 99) - (b.latency_rank ?? 99));
   if (!rows.length) return <p className="px-empty">No latency source for these instances yet.</p>;
-  const max = Math.max(...rows.map(s => s.latency_us!), app.measured ? 700 : 0);
+  const max = Math.max(...rows.map(s => s.latency_us!), app.measured ? 700 : 1);
   return (
     <div ref={t.box} className="ls-bars" onMouseLeave={t.hide} role="list" aria-label="Application server to database latency">
       {app.measured ? <div className="ls-target" style={{ left: `calc(180px + (100% - 270px) * ${300 / max})` }} title="0.3 ms target"><span>0.3 ms</span></div> : null}
@@ -94,7 +94,8 @@ export default function LandscapePanel({ land, hanaLive, mode }: { land: Landsca
                   <div key={h.host} className={`ls-host ${h.active ? "" : "off"}`} data-testid={`ls-host-${h.host}`}>
                     <b>{h.host}</b><span className="ls-role">{h.role || "?"}{h.active ? "" : " · inactive"}</span>
                     {mode === "live" && l ? <span className="ls-host-m">CPU {pct(l.cpu)} · mem {pct(mem)}</span> : null}
-                    <Where c={land.cloud[h.host] ?? (h.platform ? { provider: h.platform, vm_size: h.model } : undefined)} />
+                    <Where c={(land.cloud[h.host]?.provider && land.cloud[h.host]?.provider !== "none") || land.cloud[h.host]?.zone ? land.cloud[h.host]
+                      : h.platform ? { provider: h.platform, vm_size: h.model } : undefined} />
                   </div>
                 );
               })}
@@ -108,12 +109,12 @@ export default function LandscapePanel({ land, hanaLive, mode }: { land: Landsca
             )) : null}
           </div>
           {sr ? (
-            <table className="px-t" data-testid="ls-hsr"><thead><tr><th>Service</th><th>Status</th><th>Backlog</th><th>Shipping delay</th></tr></thead>
+            <div className="ls-scroll"><table className="px-t" data-testid="ls-hsr"><thead><tr><th>Service</th><th>Status</th><th>Backlog</th><th>Shipping delay</th></tr></thead>
               <tbody>{sr.services.map(s => (
                 <tr key={`${s.host}:${s.port}:${s.secondary_site}`}><td><b>{s.host}:{s.port}</b><small>→ {s.secondary_host} ({s.secondary_site}, {s.mode})</small></td>
                   <td><StatusPill rating={HSR_RATING[s.status] ?? "serious"} />{s.details ? <small>{s.details}</small> : null}</td>
                   <td>{s.backlog_s == null ? "–" : `${s.backlog_s} s`}<small>{s.backlog_mb} MB</small></td>
-                  <td>{s.shipping_delay_s == null ? "–" : `${s.shipping_delay_s} s`}</td></tr>))}</tbody></table>
+                  <td>{s.shipping_delay_s == null ? "–" : `${s.shipping_delay_s} s`}</td></tr>))}</tbody></table></div>
           ) : <p className="ls-src">No HANA system replication configured{hosts.length ? "" : " (or HANA not reachable)"}.</p>}
           {mode === "day" && land.hana.takeovers?.length ? (
             <p className="ls-src" data-testid="ls-takeover"><b>Takeover that day:</b> {land.hana.takeovers.map(t => `${t.start.slice(11, 16)} ${t.from_site} → ${t.to_site} (${t.type})`).join(" · ")}</p>) : null}
