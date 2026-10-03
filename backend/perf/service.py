@@ -12,6 +12,7 @@ from ahc.hana import HanaViaSm69
 from ahc.sap import Sap
 
 from . import collect as C
+from . import landscape as L
 from .kpi import Kpi, dialog_kpis, overall, rate_high, rate_low
 
 LIMIT_DAYS = 90          # analysis window (decision 2026-10-02); SAP may keep less
@@ -46,6 +47,19 @@ RECOMMEND = {
                     "they reload; increase memory or reduce footprint.",
     "hana_savepoint": "Long savepoints block writes briefly: check the data volume I/O (M_VOLUME_IO_TOTAL_STATISTICS).",
     "smon_queue": "SMON saw requests waiting in the dialog queue.",
+    "app_db_rtt": "At least one application server is far from the database: route dialog users and heavy batch "
+                  "to the nearest instance (logon groups SMLG, job server groups SM61) and check the placement "
+                  "— same availability zone / proximity placement group as HANA (SAP Note 1100926: ≤ 0.7 ms).",
+    "app_servers": "An application server instance is not running: check SM51 and the instance's dev_disp/dev_w0.",
+    "hana_hosts": "A HANA worker host is not active: check the host and its services (sapcontrol GetProcessList, "
+                  "M_SERVICES); a standby takes over only if the failover is configured.",
+    "hsr_status": "HANA system replication is not in sync: check M_SERVICE_REPLICATION.REPLICATION_STATUS_DETAILS, "
+                  "the network to the secondary site and the secondary's trace files — a takeover now would lose data "
+                  "or fail.",
+    "hsr_lag": "Log shipping to the secondary is behind: check the network throughput between the sites and the "
+               "async log buffer (SAP Note 1999880).",
+    "hsr_takeover": "A system replication takeover happened that day: check the cause in the nameserver trace and "
+                    "that the former primary was re-registered as secondary.",
 }
 
 
@@ -119,11 +133,14 @@ def hana_kpis(hana: Optional[dict], spark: dict) -> list[Kpi]:
                     detail="HANA not reachable — SM69 command ZAHC_HDBSQL needed")]
     out = []
     hosts = hana.get("hosts") or []
-    used = sum(h.get("mem_used_gb") or 0 for h in hosts)
-    limit = sum(h.get("mem_limit_gb") or 0 for h in hosts)
-    pct = round(used / limit * 100, 1) if limit else None
-    out.append(Kpi("hana_mem", "HANA memory used", pct, "%", rate_high(pct, 80, 90, 95),
-                   f"{used:,.1f} of {limit:,.1f} GB allocation limit", "< 80 %", "HANA", spark.get("hana_mem", [])))
+    # scale-out: every host has its own allocation limit, so the host closest to it decides
+    worst = max((h for h in hosts if h.get("mem_limit_gb")), key=lambda h: (h.get("mem_used_gb") or 0) / h["mem_limit_gb"],
+                default=None)
+    pct = round((worst.get("mem_used_gb") or 0) / worst["mem_limit_gb"] * 100, 1) if worst else None
+    detail = (f"{worst.get('mem_used_gb') or 0:,.1f} of {worst['mem_limit_gb']:,.1f} GB allocation limit"
+              + (f" · {worst['host']} (fullest of {len(hosts)} hosts)" if len(hosts) > 1 else "")) if worst else ""
+    out.append(Kpi("hana_mem", "HANA memory used", pct, "%", rate_high(pct, 80, 90, 95), detail, "< 80 %", "HANA",
+                   spark.get("hana_mem", [])))
     cpus = [h["cpu"] for h in hosts if h.get("cpu") is not None]
     cpu = max(cpus) if cpus else None
     out.append(Kpi("hana_cpu", "HANA CPU", cpu, "%", rate_high(cpu, 70, 85, 95), "busiest host", "< 70 %", "HANA",
@@ -143,6 +160,74 @@ def hana_kpis(hana: Optional[dict], spark: dict) -> list[Kpi]:
     out.append(Kpi("hana_savepoint", "Longest savepoint (24 h)", sp, "s", rate_high(sp, 30, 120, 300),
                    f"average {hana.get('savepoint_avg_s') or 0} s", "< 30 s", "HANA"))
     return out
+
+
+def landscape_kpis(land: dict, live: bool = True) -> list[Kpi]:
+    """Instances, app→DB latency, HANA hosts and system replication. A day view only rates what
+    belongs to that day (latency from that day's SMON/ST03N, takeovers); instance and HSR state are
+    'now' and stay in the landscape panel."""
+    ks: list[Kpi] = []
+    app = land.get("app") or {}
+    if live and app.get("count", 0) > 1:
+        down = [s["name"] for s in app["servers"] if not s["active"] and not s.get("historic")]
+        ks.append(Kpi("app_servers", "Application servers active", app["active"], f"/ {app['count']}",
+                      "serious" if down else "good", ("not active: " + ", ".join(down)) if down else "all instances up",
+                      "all"))
+    if app.get("source") and app.get("measured"):
+        rows = [s for s in app["servers"] if s.get("latency_us") is not None]
+        worst = max(rows, key=lambda s: s["latency_us"])
+        near = next(s for s in rows if s.get("nearest"))
+        ks.append(Kpi("app_db_rtt", "App server → DB round trip", round(worst["latency_us"] / 1000, 2), "ms",
+                      L.rate_rtt(worst["latency_us"]),
+                      (f"slowest {worst['name']} · nearest {near['name']} {near['latency_us'] / 1000:.2f} ms"
+                       if len(rows) > 1 else f"{worst['name']}"), "≤ 0.3 ms (Note 1100926)"))
+    hana = land.get("hana") or {}
+    hosts = hana.get("hosts") or []
+    if live and len(hosts) > 1:
+        bad = [h["host"] for h in hosts if not h["active"] and h["role"] != "standby"]
+        ks.append(Kpi("hana_hosts", "HANA hosts active", sum(1 for h in hosts if h["active"]), f"/ {len(hosts)}",
+                      "critical" if bad else "good",
+                      ("inactive worker: " + ", ".join(bad)) if bad else
+                      " · ".join(f"{h['host']} {h['role'] or '?'}" for h in hosts)[:120], "all workers", "HANA"))
+    sr = hana.get("hsr")
+    if live and sr:
+        sites = ", ".join(f"{x['site']} ({x['mode']})" for x in sr["sites"]) or "secondary"
+        ks.append(Kpi("hsr_status", "System replication", sr["status"].title(), "",
+                      L.HSR_RANK.get(sr["status"], "serious"), f"{sr['primary_site']} → {sites}",
+                      "Active", "HANA"))
+        lag = sr.get("max_lag_s")
+        ks.append(Kpi("hsr_lag", "Replication log backlog", lag, "s", rate_high(lag, 30, 300, 900),
+                      "log shipping backlog, worst service", "< 30 s", "HANA"))
+    if hana.get("takeovers"):
+        t = hana["takeovers"][-1]
+        ks.append(Kpi("hsr_takeover", "HSR takeovers that day", len(hana["takeovers"]), "", "serious",
+                      f"last {t['start'][11:16]} {t['from_site']} → {t['to_site']}", "0", "HANA"))
+    return ks
+
+
+def landscape(sap: Sap, sid: str, info: dict, h: Optional[HanaViaSm69], day: dt.date, servers: list[dict],
+              local_os: dict, smon_installed: bool, live_since: Optional[dt.datetime], notes: list[str]) -> dict:
+    """App tier per instance + HANA hosts/HSR + cloud placement + nearest app server to the DB."""
+    wl = C._safe(lambda: L.instance_workload(sap, sid, day, notes), notes, "ST03N per instance", [])
+    if not wl and live_since is not None:          # live, nothing aggregated yet today → yesterday
+        wl = C._safe(lambda: L.instance_workload(sap, sid, day - dt.timedelta(days=1), notes), notes,
+                     "ST03N per instance", [])
+    smon = C._safe(lambda: L.smon_servers(sap, day, live_since), notes, "SMON per server", {}) if smon_installed else {}
+    hana: dict = {}
+    client_rtt: dict = {}
+    if h:
+        hana = C._safe(lambda: L.hana_landscape(h, notes), notes, "HANA landscape", {}) or {}
+        if live_since is not None:
+            client_rtt = C._safe(lambda: L.hana_client_rtt(h), notes, "HANA client network I/O", {})
+        else:
+            hana["takeovers"] = C._safe(lambda: L.takeovers(h, day), notes, "HSR takeover history", [])
+    db_hosts = [x["host"] for x in hana.get("hosts", []) if x.get("active")] or \
+        [(info.get("RFCDBHOST") or "").strip()]
+    app_hosts = list(dict.fromkeys(s.get("host", "") for s in servers if s.get("host")))
+    cloud = L.placement(sap, sid, app_hosts, [d for d in db_hosts if d], notes)
+    app = L.app_servers(servers, (info.get("RFCDEST") or "").strip(), wl, smon, client_rtt, cloud,
+                        db_hosts, local_os, live=live_since is not None)
+    return {"app": app, "hana": hana, "cloud": cloud, "db_hosts": db_hosts}
 
 
 def findings(kpis: list[Kpi]) -> list[dict]:
@@ -181,7 +266,20 @@ def live(client: RfcSoapClient, sap_client: str) -> dict:
             hana["today"] = today
         spark["hana_cpu"] = [p["cpu_max"] for p in today]
         spark["hana_mem"] = [round(p["mem_max_gb"] / p["limit_gb"] * 100, 1) if p["limit_gb"] else 0 for p in today]
-    kpis = live_kpis(sapd, work, hana, smon, spark)
+    local_os = {"cpu": sapd["cpu"]["util"], "free_mem": sapd["memory"]["free_pct"], "users": sapd.get("users")}
+    land = landscape(sap, sid, info, h, now.date(), sapd["servers"], local_os, bool(smon.get("installed")),
+                     now - dt.timedelta(hours=1), notes)
+    kpis = live_kpis(sapd, work, hana, smon, spark) + landscape_kpis(land)
+    tier = land["app"]["servers"]
+    if land["app"]["count"] > 1:     # ST06/SM04 figures are this instance only — use every instance SMON saw
+        cpus = [s for s in tier if s.get("cpu") is not None]
+        for k in kpis:
+            if k.id == "host_cpu" and len(cpus) > 1:
+                busiest = max(cpus, key=lambda s: s["cpu"])
+                k.value, k.rating = busiest["cpu"], rate_high(busiest["cpu"], 70, 85, 95)
+                k.label, k.detail = "App server CPU (busiest)", f"{busiest['name']} · {len(cpus)} instances (SMON)"
+            elif k.id in ("host_cpu", "host_mem", "users"):
+                k.detail = f"{(info.get('RFCDEST') or '').strip()} only · " + k.detail
     if work is None:
         for k in kpis:
             if k.id == "dia_resp":
@@ -189,7 +287,7 @@ def live(client: RfcSoapClient, sap_client: str) -> dict:
     return {"mode": "live", "sid": sid, "client": sap_client, "release": info.get("RFCSAPRL", ""),
             "db": info.get("RFCDBSYS", ""), "host": info.get("RFCHOST", ""), "as_of": now.isoformat(sep=" "),
             "overall": overall(kpis), "kpis": [k.dict() for k in kpis], "findings": findings(kpis),
-            "sap": sapd, "workload": work, "hourly": hours, "smon": smon, "hana": hana,
+            "sap": sapd, "workload": work, "hourly": hours, "smon": smon, "hana": hana, "landscape": land,
             "notes": notes, "took_s": round(time.time() - t0, 1), "calls": len(sap.calls)}
 
 
@@ -206,8 +304,13 @@ def day(client: RfcSoapClient, sap_client: str, date: dt.date) -> dict:
         smon_series = C._safe(lambda: C.smon_day(sap, date, 15), notes, "SMON series", [])
     h = _hana(sap, notes)
     hana_hours: list = []
+    hana_host_hours: dict = {}
     if h:
-        hana_hours = C._safe(lambda: C.hana_day(h, date), notes, "HANA history", [])
+        hana_host_hours = C._safe(lambda: C.hana_day_hosts(h, date), notes, "HANA history", {})
+        hana_hours = C.worst_per_hour(hana_host_hours)
+    x = Ctx(sap=sap, sid=sid, client=sap_client, now=now)
+    C._safe(lambda: C.load_servers(x), notes, "TH_SERVER_LIST")
+    land = landscape(sap, sid, info, h, date, x.servers, {}, bool(smon.get("installed")), None, notes)
     kpis = dialog_kpis((work or {}).get("dialog") or {})
     for k in kpis:
         if k.id == "dia_resp":
@@ -221,6 +324,7 @@ def day(client: RfcSoapClient, sap_client: str, date: dt.date) -> dict:
         kpis.append(Kpi("hana_mem", "HANA memory peak", round(peak_mem, 1) if peak_mem else None, "%",
                         rate_high(peak_mem, 80, 90, 95), "vs allocation limit", "< 80 %", "HANA",
                         [round(p["mem_max_gb"] / p["limit_gb"] * 100, 1) if p["limit_gb"] else 0 for p in hana_hours]))
+    kpis += landscape_kpis(land, live=False)
     if smon_series:
         q = max(p["diaq"] for p in smon_series)
         kpis.append(Kpi("smon_queue", "Peak dialog queue (SMON)", q, "", rate_high(q, 1, 10, 50), "15-min average", "0"))
@@ -228,7 +332,8 @@ def day(client: RfcSoapClient, sap_client: str, date: dt.date) -> dict:
             "release": info.get("RFCSAPRL", ""), "db": info.get("RFCDBSYS", ""), "host": info.get("RFCHOST", ""),
             "as_of": now.isoformat(sep=" "), "overall": overall(kpis), "kpis": [k.dict() for k in kpis],
             "findings": findings(kpis), "workload": work, "hourly": (work or {}).get("hourly", []),
-            "smon": {**smon, "series": smon_series}, "hana_hours": hana_hours,
+            "smon": {**smon, "series": smon_series}, "hana_hours": hana_hours, "hana_host_hours": hana_host_hours,
+            "landscape": land,
             "notes": notes, "took_s": round(time.time() - t0, 1), "calls": len(sap.calls)}
 
 

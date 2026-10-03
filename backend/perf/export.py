@@ -27,6 +27,68 @@ def _fmt(v, unit: str = "") -> str:
     return f"{v} {unit}".strip() if unit else str(v)
 
 
+def _us(v) -> str:
+    if v is None:
+        return "–"
+    return f"{v / 1000:.2f} ms" if v >= 1000 else f"{round(v)} µs"
+
+
+def _where(c: dict) -> str:
+    c = c or {}
+    if c.get("error"):
+        return ""
+    return " · ".join(x for x in (c.get("provider"), c.get("zone"), c.get("vm_size"),
+                                  f"PG {c['placement_group']}" if c.get("placement_group") else "") if x)
+
+
+def _placement(r: dict) -> str:
+    out = []
+    if r.get("same_host_as_db"):
+        out.append("same host as DB")
+    if "same_zone_as_db" in r:
+        out.append("same zone as DB" if r["same_zone_as_db"] else "other zone than DB")
+    if r.get("same_pg_as_db"):
+        out.append("same placement group")
+    return ", ".join(out)
+
+
+def landscape_rows(land: dict) -> dict:
+    """Table rows shared by the workbook and the PDF."""
+    app = land.get("app") or {}
+    apps = [[("★ " if r.get("nearest") else "") + r["name"], r["host"],
+             "this instance" if r.get("local") else ("not running now" if r.get("historic")
+                                                     else ("active" if r["active"] else "inactive")),
+             _where(r.get("cloud")), _placement(r),
+             f"{r['busy_dia']} / {r['total_dia']}" if r.get("total_dia") else "–",
+             "–" if r.get("cpu") is None else f"{r['cpu']:.0f} %",
+             "–" if r.get("dia_resp_ms") is None else f"{r['dia_resp_ms']:,.1f}",
+             _us(r.get("db_us_per_call")), _us(r.get("rtt_smon_us")), _us(r.get("rtt_hana_us")),
+             r.get("latency_rank") or "–"] for r in app.get("servers", [])]
+    hana = land.get("hana") or {}
+    hosts = [[h["host"], h["role"], "yes" if h["active"] else "no", h["status"],
+              _where((land.get("cloud") or {}).get(h["host"])) or " ".join(x for x in (h.get("platform"), h.get("model")) if x)]
+             for h in hana.get("hosts") or []]
+    sr = hana.get("hsr") or {}
+    hsr = [[f"{x['host']}:{x['port']}", f"{x['secondary_host']} ({x['secondary_site']})", x["mode"], x["status"],
+            x["secondary_active"], "–" if x["backlog_s"] is None else x["backlog_s"], x["backlog_mb"],
+            "–" if x["shipping_delay_s"] is None else x["shipping_delay_s"], x["details"]] for x in sr.get("services", [])]
+    return {"apps": apps, "hosts": hosts, "hsr": hsr}
+
+
+def nearest_sentence(land: dict) -> str:
+    app = land.get("app") or {}
+    near = next((r for r in app.get("servers", []) if r.get("nearest")), None)
+    if not near:
+        return "No application server could be ranked by latency to the database."
+    extra = _placement(near)
+    if near.get("latency_us") is None:
+        return (f"Only application server: {near['name']} ({near['host']}){' · ' + extra if extra else ''}. "
+                "No latency source yet — " + " ".join(app.get("how_to_measure") or []))
+    what = "network round trip" if app.get("measured") else "DB time per DB call"
+    return (f"Closest application server to the database: {near['name']} ({near['host']}) — {what} "
+            f"{_us(near.get('latency_us'))}{' · ' + extra if extra else ''}. Source: {app.get('source_label', '')}.")
+
+
 def _title(d: dict) -> str:
     when = f"day {d.get('date')}" if d.get("mode") == "day" else f"live {str(d.get('as_of', ''))[:16]}"
     return f"Performance — {d.get('sid', '?')} {d.get('client', '')} — {when}"
@@ -143,6 +205,22 @@ def to_xlsx(d: dict) -> bytes:
                [[b["name"], b["hit"], b["free_pct"], b["swaps"], b["requests"]] for b in s["buffers"]["buffers"]],
                [16, 12, 13, 10, 14])
 
+    land = d.get("landscape") or {}
+    if land:
+        lr = landscape_rows(land)
+        _sheet(wb, "App servers", nearest_sentence(land)[:250],
+                    ["Instance", "Host", "State", "Cloud placement", "vs database", "Dialog WPs busy", "CPU",
+                     "Dialog resp ms", "DB time / call", "RTT SMON", "RTT HANA trace", "Latency rank"],
+                    lr["apps"], [22, 14, 14, 36, 30, 12, 8, 12, 12, 11, 13, 10])
+        if lr["hosts"]:
+            _sheet(wb, "HANA hosts", "HANA hosts (M_LANDSCAPE_HOST_CONFIGURATION) — current state",
+                   ["Host", "Role", "Active", "Status", "Platform / placement"], lr["hosts"], [14, 12, 8, 10, 50])
+        if lr["hsr"]:
+            sr = land["hana"]["hsr"]
+            _sheet(wb, "System replication", f"HANA system replication {sr['primary_site']} → "
+                   + ", ".join(f"{x['site']} ({x['mode']}, {x['status']})" for x in sr["sites"]),
+                   ["Service", "Secondary", "Mode", "Status", "Secondary active", "Backlog s", "Backlog MB",
+                    "Shipping delay s", "Details"], lr["hsr"], [16, 22, 8, 10, 10, 10, 10, 14, 50])
     hana = d.get("hana") or {}
     hh = d.get("hana_hours") or hana.get("today") or []
     if hh:
@@ -336,6 +414,31 @@ def to_pdf(d: dict) -> bytes:
                          f"{q['share']} %", Paragraph(esc(q["statement"]), S)])
         story.append(KeepTogether([Paragraph("Top SQL statements by total execution time", H2),
                                    table(data, [22 * mm, 18 * mm, 16 * mm, 16 * mm, 14 * mm, 94 * mm])]))
+
+    land = d.get("landscape") or {}
+    if land:
+        lr = landscape_rows(land)
+        story += [Paragraph("System landscape", H2), Paragraph(esc(nearest_sentence(land)), P)]
+        if lr["apps"]:
+            data = [["Instance", "Placement", "Dialog resp ms", "DB time / call", "RTT SMON", "RTT HANA", "Rank"]]
+            for r in lr["apps"]:
+                data.append([Paragraph(f"<b>{esc(r[0])}</b><br/>{esc(r[1])} · {esc(r[2])}", S),
+                             Paragraph(esc(" · ".join(x for x in (r[3], r[4]) if x)) or "–", S),
+                             r[7], r[8], r[9], r[10], str(r[11])])
+            story.append(table(data, [40 * mm, 46 * mm, 20 * mm, 20 * mm, 18 * mm, 18 * mm, 12 * mm]))
+        if lr["hosts"]:
+            data = [["HANA host", "Role", "Active", "Status", "Platform / placement"]] + \
+                [[r[0], r[1], r[2], r[3], Paragraph(esc(r[4]), S)] for r in lr["hosts"]]
+            story += [Spacer(1, 6), table(data, [30 * mm, 22 * mm, 16 * mm, 18 * mm, 88 * mm])]
+        if lr["hsr"]:
+            sr = land["hana"]["hsr"]
+            story.append(Paragraph(esc(f"System replication {sr['primary_site']} → " + ", ".join(
+                f"{x['site']} ({x['mode']}, {x['status'].title()})" for x in sr["sites"])), P))
+            data = [["Service", "Secondary", "Status", "Backlog s", "Shipping delay s", "Details"]] + \
+                [[r[0], Paragraph(esc(r[1]), S), r[3], str(r[5]), str(r[7]), Paragraph(esc(r[8]), S)] for r in lr["hsr"]]
+            story.append(table(data, [28 * mm, 34 * mm, 18 * mm, 18 * mm, 24 * mm, 56 * mm]))
+        for t in (land.get("hana") or {}).get("takeovers") or []:
+            story.append(Paragraph(esc(f"Takeover {t['start']} {t['from_site']} → {t['to_site']} ({t['type']})"), P))
 
     story.append(Paragraph("Findings and recommendations", H2))
     if d.get("findings"):

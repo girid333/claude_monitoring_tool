@@ -581,6 +581,48 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
   update errors, read-only call check) and `test_ui_perf` (6: live, day,
   exports, auto refresh, SMON offer/decline/schedule, mobile).
 
+### D-052b (2026-10-03) — Landscape: several app servers, HANA scale-out + HSR, nearest app server to the DB.
+- **Giri's decisions (2026-10-03):** latency from read-only sources only (no
+  niping); cloud placement from a new SM69 command ZAHC_CLOUDMETA that BASIS
+  creates (script `deploy/sap/zahc_cloudmeta.sh`, run per host with
+  SXPG TARGETSYSTEM — verified TARGETSYSTEM works on F4H with
+  ZAHC_SAPCONTROL); verify with the simulated SAP (F4H is single-server, no HSR).
+- `backend/perf/landscape.py`: per instance = TH_WPINFO, ST03N instance
+  component with **FACTOR=1 → µs** (DB time per physical DB call =
+  DBTI/PHYCALLS; F4H READDIRTI is 0 even in µs, so direct reads can't be
+  used), SMON per SERVER (CPU, free mem, queue, NETRTT). OS figures of other
+  instances only exist via SMON — GET_CPU_ALL REMOTE fails (SYSTEM_FAILURE),
+  TH_SYSTEMWIDE_USER_LIST faults over SOAP; local figures are labelled
+  "<instance> only" when there are several instances.
+- **Latency source order:** SMON NETRTT (DD04T on F4H: "Network RTT (E.
+  Acc.DB) in usec") → HANA M_SQL_CLIENT_NETWORK_IO (CLIENT_DURATION −
+  SERVER_DURATION per CLIENT_HOST; empty on F4H until the trace is on) →
+  ST03N DB time per call (ranks only, never rated). The chosen source must
+  cover every active instance; live ranks running instances only, a day
+  view ranks every instance that worked that day. Rating per SAP Note
+  1100926: ≤ 0.3 ms good, ≤ 0.7 moderate, > 0.7 poor (1.5 ms critical).
+  One instance → it is "nearest" by definition.
+- **HANA:** M_LANDSCAPE_HOST_CONFIGURATION roles (inactive standby is
+  normal), M_HOST_INFORMATION hw_manufacturer/hw_model (F4H Hyper-V says
+  "Microsoft Corporation / Virtual Machine" — same as an Azure VM, so shown
+  as "Azure or Hyper-V"), HANA memory KPI = fullest host (was the sum),
+  hourly history per host (`hana_day_hosts`, worst host per hour for the
+  chart). HSR: M_SYSTEM_REPLICATION + M_SERVICE_REPLICATION (status,
+  details, BACKLOG_TIME µs, LAST vs SHIPPED_LOG_POSITION_TIME), takeovers
+  from M_SYSTEM_REPLICATION_TAKEOVER_HISTORY in day views. Day views rate
+  only that day's facts (takeovers, latency); instance/HSR state is "now".
+- **SXPG gotcha #2:** `%word%` in parameters is substituted (LIKE
+  '%cloud%' reached HANA as a CLOUD column); `ahc.hana.sxpg_safe` refuses
+  it — use LOCATE(). A single `%` is fine.
+- ZAHC_CLOUDMETA results cached per host 1 h (errors 60 s). AWS gives AZ +
+  placement group; Azure IMDS has no proximity placement group (zone only).
+- UI: `LandscapePanel.tsx` (closest server hero, latency bars with 0.3 ms
+  line + tooltips, DB tier with primary/secondary sites and HSR table,
+  per-instance table). Exports: sheets App servers / HANA hosts / System
+  replication; PDF "System landscape" section.
+- Tests: `test_perf_landscape` (18, fake `/perf/multi|cloud|nettrace|hsr_bad`)
+  and `test_ui_perf` test_07.
+
 ---
 
 ## 3. Architecture Snapshot
@@ -1045,6 +1087,10 @@ SQL, CTLGA made buffers critical, PDF dropped `<…>` names, no explanation
 when the collector is stopped, day API allowed dates beyond 90 days,
 HANA chart drew straight lines across hours with no history. All
 suites green; device copy synced, uncommitted.
+
+**2026-10-03 — D-052b landscape (Cowork).** Multi-instance, HANA scale-out
+and HSR analysis plus "closest app server to the DB" with cloud placement;
+ZAHC_CLOUDMETA script for BASIS; verified single-server paths on F4H.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

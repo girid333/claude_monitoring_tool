@@ -78,7 +78,7 @@ export function clearCount(s: Summary): number { return s.ok + s.expected; }
 // ── D-052: Performance ─────────────────────────────────────────────────────
 export type Rating = "good" | "warning" | "serious" | "critical" | "unknown";
 export interface PerfKpi {
-  id: string; label: string; value: number | null; unit: string; rating: Rating;
+  id: string; label: string; value: number | string | null; unit: string; rating: Rating;
   detail: string; target: string; group: "SAP" | "HANA"; spark: number[];
 }
 export interface HourPoint {
@@ -103,7 +103,34 @@ export interface Smon {
   installed: boolean; active: boolean; last: string | null; why?: string;
   series?: SmonPoint[]; latest?: SmonPoint | null;
 }
-export interface HanaHour { hour: number; cpu_avg: number; cpu_max: number; mem_avg_gb: number; mem_max_gb: number; limit_gb: number }
+export interface HanaHour { hour: number; cpu_avg: number; cpu_max: number; mem_avg_gb: number; mem_max_gb: number; limit_gb: number;
+  cpu_host?: string; mem_host?: string; hosts?: number }
+// D-052b: application servers, HANA scale-out + system replication, cloud placement
+export interface CloudMeta { provider?: string; region?: string; zone?: string; vm_size?: string; placement_group?: string;
+  instance_id?: string; error?: string }
+export interface AppServerRow {
+  name: string; host: string; active: boolean; local: boolean; historic: boolean; services: string;
+  wp: Record<string, WpCount>; busy_dia: number | null; total_dia: number | null;
+  cpu: number | null; free_mem: number | null; os_source: string; diaq: number | null; users: number | null;
+  dia_steps: number | null; dia_resp_ms: number | null; dia_db_ms: number | null; db_us_per_call: number | null;
+  workload_date: string | null; rtt_smon_us: number | null; rtt_hana_us: number | null;
+  same_host_as_db: boolean; same_zone_as_db?: boolean; same_pg_as_db?: boolean; cloud: CloudMeta;
+  latency_rank?: number; latency_us?: number; latency_rating?: Rating; nearest?: boolean;
+}
+export interface HsrService { host: string; port: string; secondary_host: string; secondary_site: string; mode: string;
+  status: string; secondary_active: string; shipping_delay_s: number | null; backlog_mb: number; backlog_s: number | null;
+  reconnects: number; failovers: number; details: string }
+export interface Landscape {
+  app: { servers: AppServerRow[]; source: "smon" | "hana_trace" | "st03n" | null; source_label: string; measured: boolean;
+         nearest: string | null; how_to_measure: string[]; count: number; active: number };
+  hana: { hosts?: { host: string; active: boolean; status: string; role: string; nameserver: string; vendor: string;
+                    model: string; platform: string }[];
+          hsr?: { primary_site: string; status: string; max_lag_s: number | null;
+                  sites: { site: string; source: string; mode: string; status: string; operation_mode: string; tier: number;
+                           hosts: string[] }[]; services: HsrService[] } | null;
+          takeovers?: { start: string; end: string; to_site: string; from_site: string; type: string; mode: string }[] };
+  cloud: Record<string, CloudMeta>; db_hosts: string[];
+}
 export interface HanaSql { hash: string; executions: number; total_s: number; avg_ms: number; share: number; statement: string }
 export interface HanaLive {
   hosts: { host: string; cpu: number | null; mem_used_gb: number | null; mem_limit_gb: number | null;
@@ -127,7 +154,8 @@ export interface PerfView {
   as_of: string; overall: { score: number | null; grade: string; rating: Rating; counts: Record<string, number> };
   kpis: PerfKpi[]; findings: { kpi: string; rating: Rating; title: string; detail: string; recommendation: string }[];
   sap?: SapLive; workload: Workload | null; hourly: HourPoint[]; smon: Smon; hana?: HanaLive | null;
-  hana_hours?: HanaHour[]; notes: string[]; took_s: number; calls: number;
+  hana_hours?: HanaHour[]; hana_host_hours?: Record<string, HanaHour[]>; landscape?: Landscape;
+  notes: string[]; took_s: number; calls: number;
 }
 export interface PerfRanges {
   sid: string; today: string; workload_days: string[]; hana_from: string | null; oldest: string | null;

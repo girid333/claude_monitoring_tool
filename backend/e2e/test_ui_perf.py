@@ -147,6 +147,28 @@ def test_05_smon_offer_decline_and_schedule(page):
     expect(page.locator(".px-smon .px-note")).to_contain_text("/SDF/SMON")
 
 
+def test_07_landscape(page):
+    fake("/perf/multi/on")
+    open_perf(page)
+    expect(page.get_by_test_id("ls-nearest-name")).to_have_text("qas_QAS_01")
+    expect(page.get_by_test_id("ls-lat-qas_QAS_02")).to_contain_text("Serious")
+    expect(page.locator("[data-testid^=ls-app-]")).to_have_count(3)
+    expect(page.get_by_test_id("ls-app-qas_QAS_01")).to_contain_text("★")
+    expect(page.get_by_test_id("ls-host-hdb3")).to_contain_text("standby")
+    expect(page.get_by_test_id("ls-hsr")).to_contain_text("hdb2:30003")
+    expect(page.get_by_test_id("px-kpi-hsr_status")).to_contain_text("Active")
+    expect(page.get_by_test_id("px-kpi-app_db_rtt")).to_contain_text("Serious")
+    bar = page.get_by_test_id("ls-lat-qas_QAS_00")
+    bar.scroll_into_view_if_needed()
+    bar.hover()
+    expect(page.locator(".ls-bars .px-tip")).to_contain_text("SMON NETRTT")
+    page.get_by_test_id("ls-nearest").screenshot(path=str(SHOTS / "22_performance_landscape.png"))
+    page.get_by_test_id("px-mode-day").click()
+    page.get_by_test_id("px-date").fill((dt.date.today() - dt.timedelta(days=3)).isoformat())
+    expect(page.get_by_test_id("ls-takeover")).to_contain_text("SEC → PRIM", timeout=30000)
+    assert not page.errors, page.errors
+
+
 def test_06_mobile(browser):
     ctx = browser.new_context(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True)
     pg = ctx.new_page()

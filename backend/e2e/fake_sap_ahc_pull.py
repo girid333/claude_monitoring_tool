@@ -31,7 +31,9 @@ USER, PASSWORD = "MONITOR", "secret"
 TZ = 19800                                     # +5:30
 CALLS: list[str] = []
 STATE = {"hana": True, "sick_error": False, "sapctl": True, "port_closed": False}
-PERF = {"smon": True, "upd": False, "today": True, "tcdet": True, "work": True}      # /perf/... switches; upd off keeps the AHC SM13 check unchanged
+PERF = {"smon": True, "upd": False, "today": True, "tcdet": True, "work": True,
+        # D-052b landscape: 3 app servers, HANA scale-out + HSR, cloud metadata, HANA client network trace
+        "multi": False, "hsr_bad": False, "cloud": False, "nettrace": False}      # /perf/... switches; upd off keeps the AHC SM13 check unchanged
 JOBS: dict = {}          # jobcount -> {"name", "program", "status"}
 SM69 = "ZAHC_HDBSQL"
 
@@ -114,7 +116,7 @@ def tables() -> dict:
                           + [["TOTAL", "QAS", "W", d(ago(days=7))], ["prd_PRD_00", "PRD", "D", d(ago(days=60))]]),
         "DD02L": (["TABNAME", "AS4LOCAL", "TABCLASS"], [["/SDF/SMON_HEADER", "A", "TRANSP"]] if PERF["smon"] else []),
         "/SDF/SMON_HEADER": (["GUID", "DATUM", "TIME", "SERVER", "ACT_WPS", "ACT_DIA", "USR_TOTAL", "SYS_TOTAL",
-                              "IDLE_TOTAL", "FREE_MEM_PERC", "DIAQ", "UPDQ", "ENQQ", "USERS", "SESSIONS", "SM12_CNT"],
+                              "IDLE_TOTAL", "FREE_MEM_PERC", "DIAQ", "UPDQ", "ENQQ", "USERS", "SESSIONS", "SM12_CNT", "NETRTT"],
                              [["G"] + r[:2] + r[2:] for r in smon_rows()] if PERF["smon"] else []),
         "TSP01": (["RQIDENT", "RQCLIENT", "RQOWNER", "RQCRETIME", "RQERROR", "RQPJSERR", "RQPJHERR", "RQTITLE"],
                   [["4711", "100", "GIRI", ago(hours=2).strftime("%Y%m%d%H%M%S") + "00", "", "00001", "00000", "Bad print"],
@@ -203,15 +205,22 @@ def handle(fm, fn, body) -> str:
     n = sap_now()
     if fm == "RFC_SYSTEM_INFO":
         return resp(fm, f"<RFCSI_EXPORT><RFCSYSID>QAS</RFCSYSID><RFCSAPRL>758</RFCSAPRL><RFCDBSYS>HDB</RFCDBSYS>"
-                        f"<RFCTZONE>{TZ}</RFCTZONE><RFCHOST>qas</RFCHOST></RFCSI_EXPORT>")
+                        f"<RFCTZONE>{TZ}</RFCTZONE><RFCHOST>qas</RFCHOST><RFCDEST>qas_QAS_00</RFCDEST>"
+                        f"<RFCDBHOST>hdb</RFCDBHOST></RFCSI_EXPORT>")
     if fm == "RFC_READ_TABLE":
         return read_table(fn)
     if fm == "TH_SERVER_LIST":
-        return resp(fm, "<LIST>" + items([{"NAME": "qas_QAS_00", "HOST": "qas", "SERV": "sapdp00",
-                                           "MSGTYPES": "uw==", "STATE": "AQ=="}]) + "</LIST>")
+        srv = [{"NAME": "qas_QAS_00", "HOST": "qas", "SERV": "sapdp00", "MSGTYPES": "uw==", "STATE": "AQ=="}]
+        if PERF["multi"]:
+            srv += [{"NAME": "qas_QAS_01", "HOST": "qasapp1", "SERV": "sapdp01", "MSGTYPES": "AQ==", "STATE": "AQ=="},
+                    {"NAME": "qas_QAS_02", "HOST": "qasapp2", "SERV": "sapdp02", "MSGTYPES": "AQ==", "STATE": "AQ=="}]
+        return resp(fm, "<LIST>" + items(srv) + "</LIST>")
     if fm == "TH_USER_LIST":
         return resp(fm, "<USRLIST>" + items([{"MANDT": "100", "BNAME": "GIRI", "TERM": "laptop", "TCODE": "SM50",
                                               "ZEIT": tm(n), "EXTMODI": "2", "TYPE": "4", "RFC_TYPE": ""}]) + "</USRLIST>")
+    if fm == "TH_WPINFO" and "<SRVNAME>qas_QAS_02</SRVNAME>" in body:     # busy instance
+        return resp(fm, "<WPLIST>" + items([{"WP_INDEX": str(i), "WP_TYP": "DIA", "WP_PID": str(300 + i),
+                                             "WP_STATUS": "Running" if i < 3 else "Waiting"} for i in range(4)]) + "</WPLIST>")
     if fm == "TH_WPINFO":
         return resp(fm, "<WPLIST>" + items([{"WP_INDEX": str(i), "WP_TYP": "DIA" if i < 3 else "BTC", "WP_PID": str(100 + i),
                                              "WP_STATUS": "Waiting"} for i in range(5)]) + "</WPLIST>")
@@ -264,7 +273,9 @@ def handle(fm, fn, body) -> str:
         if day not in workload_index_days() or comp not in swnc_components(day):
             return fault("NO_DATA_FOUND")
         part = None if comp == "TOTAL" else swnc_components(day).index(comp)
-        return resp(fm, swnc_day(day, re.search(r"<TCDET\b", body) is not None and PERF["tcdet"], part))
+        usec = "<FACTOR>1</FACTOR>" in body              # FACTOR=1: microseconds instead of ms
+        return resp(fm, swnc_day(day, re.search(r"<TCDET\b", body) is not None and PERF["tcdet"], part,
+                                 len(swnc_components(day)), 1000 if usec else 1))
     if fm == "GWY_READ_CONNECTIONS":
         if "<GWSERV>sapgw00</GWSERV>" not in body:
             return fault("GWY_GET_GWSERV_FAILED")
@@ -303,6 +314,14 @@ def handle(fm, fn, body) -> str:
                         f"<CONNECTION_TEST_RESULT>{res}</CONNECTION_TEST_RESULT>")
     if fm.startswith("BAPI_XMI_") or fm.startswith("BAPI_XBP_"):
         return xbp(fm, body)
+    if fm == "SXPG_COMMAND_EXECUTE" and "<COMMANDNAME>ZAHC_CLOUDMETA</COMMANDNAME>" in body:
+        if not PERF["cloud"]:
+            return fault("COMMAND_NOT_FOUND")
+        host = (re.search(r"<TARGETSYSTEM>(.*?)</TARGETSYSTEM>", body) or [None, ""])[1]
+        meta = CLOUD.get(host)
+        out = ([f"{k}={v}" for k, v in meta.items()] if meta else ["provider=none", f"error=no cloud metadata service on {host}"])
+        return resp(fm, "<STATUS>O</STATUS><EXITCODE>0</EXITCODE><EXEC_PROTOCOL>"
+                    + items([{"MESSAGE": m} for m in out]) + "</EXEC_PROTOCOL>")
     if fm == "SXPG_COMMAND_EXECUTE":
         if STATE["sapctl"] and "<COMMANDNAME>ZAHC_SAPCONTROL</COMMANDNAME>" in body:
             add = re.search(r"<ADDITIONAL_PARAMETERS>(.*?)</ADDITIONAL_PARAMETERS>", body, re.S).group(1)
@@ -329,6 +348,38 @@ LONG_ACTION = ("Set the log mode to \"normal\". Investigate why the backup is mi
 def hana_views() -> dict:
     """View name -> (columns, rows, default order). Row order below IS the
     ORDER BY the collectors use (the fake does not sort)."""
+    return {**_landscape_views(), **_hana_views()}
+
+
+def _landscape_views() -> dict:
+    """D-052b: scale-out (hdb master, hdb2 worker, hdb3 standby) + HSR to site SEC, or a single host."""
+    multi = PERF["multi"]
+    land = (["HOST", "HOST_ACTIVE", "HOST_STATUS", "INDEXSERVER_ACTUAL_ROLE", "NAMESERVER_ACTUAL_ROLE"],
+            [["hdb", "YES", "OK", "MASTER", "MASTER"], ["hdb2", "YES", "OK", "SLAVE", "SLAVE"],
+             ["hdb3", "NO", "IGNORE", "STANDBY", "SLAVE"]] if multi else [["hdb", "YES", "OK", "MASTER", "MASTER"]])
+    info = (["HOST", "KEY", "VALUE"],
+            [[h, k, v] for h in (("hdb", "hdb2", "hdb3") if multi else ("hdb",))
+             for k, v in (("hw_manufacturer", "Amazon EC2"), ("hw_model", "r6i.8xlarge"))])
+    st = "ERROR" if PERF["hsr_bad"] else "ACTIVE"
+    sites = (["SITE_NAME", "SECONDARY_SITE_NAME", "REPLICATION_MODE", "REPLICATION_STATUS", "OPERATION_MODE", "TIER"],
+             [["PRIM", "SEC", "SYNC", st, "logreplay", "2"]] if multi else [])
+    now = sap_now()
+    ts = lambda x: f"{x:%Y-%m-%d %H:%M:%S}.000000000"  # noqa: E731
+    lag = 420 if PERF["hsr_bad"] else 2
+    svc = (["HOST", "PORT", "SECONDARY_HOST", "SECONDARY_SITE_NAME", "REPLICATION_MODE", "REPLICATION_STATUS",
+            "SECONDARY_ACTIVE_STATUS", "LAST_LOG_POSITION_TIME", "SHIPPED_LOG_POSITION_TIME", "BACKLOG_SIZE",
+            "BACKLOG_TIME", "SECONDARY_RECONNECT_COUNT", "SECONDARY_FAILOVER_COUNT", "REPLICATION_STATUS_DETAILS"],
+           [[h, "30003", h.replace("hdb", "hdbs"), "SEC", "SYNC", st if h == "hdb2" else "ACTIVE",
+             "NO" if PERF["hsr_bad"] and h == "hdb2" else "YES", ts(now), ts(now - dt.timedelta(seconds=lag)),
+             str(5 * 1024 ** 2), str(lag * 1000000), "1", "0",
+             "Connection refused by secondary site SEC" if PERF["hsr_bad"] and h == "hdb2" else ""]
+            for h in ("hdb", "hdb2")] if multi else [])
+    return {"M_SYSTEM_REPLICATION_TAKEOVER_HISTORY": (["TAKEOVER_START_TIME"], []),
+            "M_LANDSCAPE_HOST_CONFIGURATION": land, "M_HOST_INFORMATION": info,
+            "M_SERVICE_REPLICATION": svc, "M_SYSTEM_REPLICATION": sites}
+
+
+def _hana_views() -> dict:
     t = lambda d: d.strftime("%Y-%m-%d %H:%M:%S.%f000")  # noqa: E731  hdbsql timestamp format
     b = ago(hours=4)
     cat = (["ENTRY_ID", "SYS_START_TIME", "SYS_END_TIME", "STATE_NAME", "MESSAGE", "ENTRY_TYPE_NAME"],
@@ -418,14 +469,16 @@ def workload_index_days() -> list[str]:
 def swnc_components(day: str) -> list[str]:
     """Like F4H, the last 20 days only exist per instance (no TOTAL built); older days have TOTAL."""
     recent = day >= (sap_now() - dt.timedelta(days=19)).strftime("%Y%m%d")
-    return ["qas_QAS_00", "qas_QAS_01"] if recent else ["TOTAL"]
+    if not recent:
+        return ["TOTAL"]
+    return ["qas_QAS_00", "qas_QAS_01", "qas_QAS_02"] if PERF["multi"] else ["qas_QAS_00", "qas_QAS_01"]
 
 
 def _tt(code: str) -> str:
     return base64.b64encode(bytes.fromhex(code)).decode()   # RAW(1) over SOAP: "01" → "AQ=="
 
 
-def swnc_day(day: str, with_tcdet: bool, part=None) -> str:
+def swnc_day(day: str, with_tcdet: bool, part=None, parts: int = 2, scale: int = 1) -> str:
     """SWNC_COLLECTOR_GET_AGGREGATES as F4H returns it: times in MILLISECONDS summed over steps,
     base64 task types, TIME 'HH--HH', ENTRY_ID in TIMES. part 0/1 = one instance's share."""
     slow = day == (sap_now() - dt.timedelta(days=3)).strftime("%Y%m%d")      # one bad day in history
@@ -433,11 +486,15 @@ def swnc_day(day: str, with_tcdet: bool, part=None) -> str:
 
     def cnt(n: float) -> int:
         n = int(n)
-        return n if part is None else (n - n // 2 if part == 0 else n // 2)
+        return n if part is None else (n // parts + (n % parts if part == 0 else 0))
+
+    # DB calls per step differ per instance, so the DB time per call ranks them (01 lowest, 02 highest)
+    calls_per_step = {None: 1000, 0: 1000, 1: 1400, 2: 600}[part]
 
     def row(code: str, n: float, **ms) -> dict:
         c = cnt(n)
-        return {"TASKTYPE": _tt(code), "COUNT": str(c), **{k: f"{v * c:.0f}" for k, v in ms.items()}}
+        return {"TASKTYPE": _tt(code), "COUNT": str(c), "PHYCALLS": str(c * calls_per_step),
+                **{k: f"{v * c * scale:.0f}" for k, v in ms.items()}}
 
     tasks = [
         row("01", 12000, RESPTI=850 * f, CPUTI=200, DBTI=300 * f, QUEUETI=20 * f * f, ROLLWAITTI=30, GUITIME=60,
@@ -471,23 +528,42 @@ def swnc_day(day: str, with_tcdet: bool, part=None) -> str:
     return out + ("<TCDET>" + items(tcdet) + "</TCDET>" if with_tcdet else "<TCDET/>")
 
 
+# server, active dialog WPs, NETRTT µs (SMON "Network RTT (E. Acc.DB)"), idle %
+SMON_SERVERS = [("qas_QAS_00", 4, 450, "60"), ("qas_QAS_01", 2, 210, "60"), ("qas_QAS_02", 3, 900, "20")]
+
+
 def smon_rows() -> list[list[str]]:
     """Today: one snapshot per minute for the last 3 h on two servers; plus 3 days ago."""
     rows = []
     for back in (range(180, -1, -1) if PERF["today"] else []):
         t = ago(minutes=back)
-        for srv, base in (("qas_QAS_00", 4), ("qas_QAS_01", 2)):
+        for srv, base, rtt, idle in SMON_SERVERS[: 3 if PERF["multi"] else 2]:
             q = "6" if back == 30 and srv == "qas_QAS_00" else "0"
-            rows.append([d(t), tm(t), srv, str(base + 2), str(base), "30", "10", "60", "22", q, "0", "0",
-                         "12", "20", "40"])
+            rows.append([d(t), tm(t), srv, str(base + 2), str(base), "30", "10", idle, "22", q, "0", "0",
+                         "12", "20", "40", str(rtt + back % 7)])
     old = ago(days=3).replace(hour=10, minute=0, second=0)
     for k in range(0, 60, 5):
         t = old + dt.timedelta(minutes=k)
-        rows.append([d(t), tm(t), "qas_QAS_00", "9", "8", "70", "20", "10", "8", "15", "2", "0", "40", "60", "300"])
+        rows.append([d(t), tm(t), "qas_QAS_00", "9", "8", "70", "20", "10", "8", "15", "2", "0", "40", "60", "300",
+                     "450"])
     return rows
 
 
 RET = "<RETURN><TYPE></TYPE><MESSAGE></MESSAGE></RETURN>"
+
+# ZAHC_CLOUDMETA per host: DB + qas + qasapp1 in one AZ and placement group, qasapp2 in another AZ
+CLOUD = {
+    "hdb": {"provider": "AWS", "region": "eu-central-1", "zone": "eu-central-1a", "vm_size": "r6i.8xlarge",
+            "placement_group": "sap-qas-pg", "instance_id": "i-0db"},
+    "qas": {"provider": "AWS", "region": "eu-central-1", "zone": "eu-central-1a", "vm_size": "m6i.2xlarge",
+            "placement_group": "sap-qas-pg", "instance_id": "i-0a0"},
+    "qasapp1": {"provider": "AWS", "region": "eu-central-1", "zone": "eu-central-1a", "vm_size": "m6i.2xlarge",
+                "placement_group": "sap-qas-pg", "instance_id": "i-0a1"},
+    "hdb2": {"provider": "AWS", "region": "eu-central-1", "zone": "eu-central-1a", "vm_size": "r6i.8xlarge",
+             "placement_group": "sap-qas-pg", "instance_id": "i-0db2"},
+    "qasapp2": {"provider": "AWS", "region": "eu-central-1", "zone": "eu-central-1b", "vm_size": "m6i.2xlarge",
+                "instance_id": "i-0a2"},
+}
 
 
 def xbp(fm: str, body: str) -> str:
@@ -572,20 +648,43 @@ def hana_perf(sql: str):
                                                            "MEMORY_ALLOCATION_LIMIT", "DISK_USED", "DISK_SIZE")]
     if "M_LOAD_HISTORY_HOST" in sql and "MIN(TIME)" in sql:
         return ["|D|", f'|"{(n - dt.timedelta(days=30)).date()}"|']
-    if "M_LOAD_HISTORY_HOST" in sql and "GROUP BY HOUR(TIME)" in sql:
+    if "M_LOAD_HISTORY_HOST" in sql and "GROUP BY HOST, HOUR(TIME)" in sql:
         day = re.search(r"TIME >= '([\d-]+)'", sql).group(1)
+        head = ["|O|H|C|CM|"] if "AVG(CPU)" in sql else ["|O|H|M|MM|L|"]
         if day < str((n - dt.timedelta(days=30)).date()):
-            return ["|H|C|CM|"] if "AVG(CPU)" in sql else ["|H|M|MM|L|"]
+            return head
         hours = range(24) if day < str(n.date()) else range(n.hour + 1)
-        if "AVG(CPU)" in sql:
-            return ["|H|C|CM|"] + [f"|{h}|{30 + (40 if h == 10 else 0)}.5|{45 + (47 if h == 10 else 0)}.0|" for h in hours]
-        return ["|H|M|MM|L|"] + [f"|{h}|{20 * GB_}|{(28 if h == 10 else 22) * GB_}|{32 * GB_}|" for h in hours]
+        out = []
+        for host in (("hdb", "hdb2") if PERF["multi"] else ("hdb",)):
+            for h in hours:
+                if "AVG(CPU)" in sql:
+                    out.append(f'|"{host}"|{h}|{30 + (40 if h == 10 else 0)}.5|{45 + (47 if h == 10 else 0)}.0|')
+                else:   # hdb2 is the fuller host (30 of 32 GB at 10:00) in scale-out mode
+                    mm = (30 if h == 10 else 23) if host == "hdb2" else (28 if h == 10 else 22)
+                    out.append(f'|"{host}"|{h}|{20 * GB_}|{mm * GB_}|{32 * GB_}|')
+        return head + out
     if "M_LOAD_HISTORY_HOST" in sql and "ORDER BY TIME DESC" in sql:
         cols = re.match(r"SELECT (?:TOP \d+ )?(.*?) FROM", sql).group(1).split(", ")
-        vals = {"HOST": '"hdb"', "TIME": f'"{n:%Y-%m-%d %H:%M:%S}.000000000"', "CPU": "37",
-                "MEMORY_USED": str(26 * GB_), "MEMORY_ALLOCATION_LIMIT": str(32 * GB_), "DISK_USED": str(100 * GB_),
-                "DISK_SIZE": str(200 * GB_)}
-        return ["|" + "|".join(cols) + "|", "|" + "|".join(vals[c] for c in cols) + "|"]
+        out = ["|" + "|".join(cols) + "|"]
+        for host, cpu, used in ((("hdb", "37", 26), ("hdb2", "64", 29)) if PERF["multi"] else (("hdb", "37", 26),)):
+            vals = {"HOST": f'"{host}"', "TIME": f'"{n:%Y-%m-%d %H:%M:%S}.000000000"', "CPU": cpu,
+                    "MEMORY_USED": str(used * GB_), "MEMORY_ALLOCATION_LIMIT": str(32 * GB_), "DISK_USED": str(100 * GB_),
+                    "DISK_SIZE": str(200 * GB_)}
+            out.append("|" + "|".join(vals[c] for c in cols) + "|")
+        return out
+    if "FROM M_SQL_CLIENT_NETWORK_IO" in sql:
+        rows = [("qas", 520, 4000), ("qasapp1", 180, 3000), ("qasapp2", 1250, 2000)] if PERF["nettrace"] else []
+        return ["|H|N|D|"] + [f'|"{h}"|{c}|{d}|' for h, d, c in rows[: 3 if PERF["multi"] else 1]]
+    if "FROM M_SYSTEM_REPLICATION_TAKEOVER_HISTORY" in sql:
+        day = re.search(r"TAKEOVER_START_TIME >= '([\d-]+)'", sql).group(1)
+        t = (n - dt.timedelta(days=3)).replace(hour=3, minute=12, second=0)
+        cols = re.match(r"SELECT (?:TOP \d+ )?(.*?) FROM", sql).group(1).split(", ")
+        vals = {"TAKEOVER_START_TIME": f'"{t:%Y-%m-%d %H:%M:%S}.000000000"',
+                "TAKEOVER_END_TIME": f'"{t + dt.timedelta(minutes=2):%Y-%m-%d %H:%M:%S}.000000000"',
+                "SITE_NAME": '"PRIM"', "SOURCE_SITE_NAME": '"SEC"', "TAKEOVER_TYPE": '"TAKEOVER"',
+                "REPLICATION_MODE": '"SYNC"'}
+        hit = PERF["multi"] and day == str(t.date())
+        return ["|" + "|".join(cols) + "|"] + (["|" + "|".join(vals[c] for c in cols) + "|"] if hit else [])
     if "FROM M_CONNECTIONS" in sql:
         return ["|N|R|", "|142|6|"]
     if "COUNT(*) AS N FROM M_BLOCKED_TRANSACTIONS" in sql:
@@ -637,7 +736,8 @@ class H(BaseHTTPRequestHandler):
             STATE["sick_error"] = False
             STATE["sapctl"] = True
             STATE["port_closed"] = False
-            PERF.update(smon=True, upd=False, today=True, tcdet=True, work=True)
+            PERF.update(smon=True, upd=False, today=True, tcdet=True, work=True, multi=False, hsr_bad=False, cloud=False,
+                        nettrace=False)
             return self._send("ok", ctype="text/plain")
         if self.path.startswith("/jobs"):
             return self._send(json.dumps(JOBS), ctype="application/json")

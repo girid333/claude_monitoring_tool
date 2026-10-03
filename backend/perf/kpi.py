@@ -12,7 +12,7 @@ critical, unknown — the dashboard pairs each with an icon + label.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 RANK = {"good": 0, "unknown": 0, "warning": 1, "serious": 2, "critical": 3}
 
@@ -21,7 +21,7 @@ RANK = {"good": 0, "unknown": 0, "warning": 1, "serious": 2, "critical": 3}
 class Kpi:
     id: str
     label: str
-    value: Optional[float]
+    value: Optional[Union[float, str]]          # str for states, e.g. HSR "Active"
     unit: str
     rating: str = "unknown"
     detail: str = ""

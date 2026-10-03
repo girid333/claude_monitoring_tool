@@ -81,6 +81,14 @@ def _split(line: str) -> list[str]:
     return out
 
 
+def sxpg_safe(sql: str) -> str:
+    """SXPG mangles %word% in parameters (F4H: LIKE '%cloud%' reached HANA as a bare CLOUD
+    column; a single % is fine). Refuse rather than send something else than written."""
+    if re.search(r"%[A-Za-z_]\w*%", sql):
+        raise ValueError("SQL contains %name% — SXPG would substitute it; use LOCATE() instead of LIKE '%x%'")
+    return sxpg_quotes(sql)
+
+
 def sxpg_quotes(sql: str) -> str:
     """SXPG splits ADDITIONAL_PARAMETERS like a shell and insists on a blank after a closing
     single quote ("No space found after closing ' in argument string", F4H): '' ) not '')."""
@@ -102,7 +110,7 @@ class HanaViaSm69:
         self._why = ""
 
     def _run(self, sql: str) -> list[str]:
-        sql = sxpg_quotes(sql)
+        sql = sxpg_safe(sql)
         if len(sql) > MAX_SQL:
             raise ValueError(f"SQL too long for SXPG ({len(sql)} > {MAX_SQL} chars)")
         r = self.sap.call("SXPG_COMMAND_EXECUTE", COMMANDNAME=self.command,

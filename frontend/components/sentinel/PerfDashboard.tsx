@@ -3,14 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { healthApi, perfApi } from "@/lib/sentinelApi";
 import type { PerfKpi, PerfRanges, PerfView, Rating, SystemItem } from "@/lib/sentinelApi";
+import LandscapePanel from "./LandscapePanel";
 import { HourlyStack, Meter, PctLines, ScoreDial, SERIES, Spark, STATUS, STATUS_LABEL, StatusPill, WpBars } from "./PerfCharts";
 
 /* D-052 — SAP + HANA performance. Live status (manual refresh, optional auto
    refresh every 30/60 s) or one day from SAP's own history (as far back as
    SAP keeps it, at most 90 days). Exports build from the exact view shown. */
 
-const fmt = (v: number | null | undefined, unit = "") =>
-  v == null ? "–" : `${v.toLocaleString(undefined, { maximumFractionDigits: v < 10 ? 2 : v < 1000 ? 1 : 0 })}${unit ? ` ${unit}` : ""}`;
+const fmt = (v: number | string | null | undefined, unit = "") =>
+  v == null ? "–" : typeof v === "string" ? v : `${v.toLocaleString(undefined, { maximumFractionDigits: v < 10 ? 2 : v < 1000 ? 1 : 0 })}${unit ? ` ${unit}` : ""}`;
 
 const HEADLINE: Record<Rating, string> = {
   good: "Performing well", warning: "Mostly healthy, a few figures to watch", serious: "Performance needs attention",
@@ -179,11 +180,12 @@ export default function PerfDashboard() {
             {view.mode === "live" && view.sap ? (
               <div className="px-hero-m">
                 <Meter label="Dialog WPs busy" value={view.sap.dia_util} rating={view.kpis.find(k => k.id === "dia_util")?.rating ?? "unknown"} />
-                <Meter label="App server CPU" value={view.sap.cpu.util} rating={view.kpis.find(k => k.id === "host_cpu")?.rating ?? "unknown"} />
-                <Meter label="HANA memory" value={view.kpis.find(k => k.id === "hana_mem")?.value ?? null}
+                <Meter label={view.kpis.find(k => k.id === "host_cpu")?.label ?? "App server CPU"}
+                  value={(view.kpis.find(k => k.id === "host_cpu")?.value as number | null) ?? view.sap.cpu.util} rating={view.kpis.find(k => k.id === "host_cpu")?.rating ?? "unknown"} />
+                <Meter label="HANA memory" value={(view.kpis.find(k => k.id === "hana_mem")?.value as number | null) ?? null}
                   rating={view.kpis.find(k => k.id === "hana_mem")?.rating ?? "unknown"} />
                 <div className="px-mini">
-                  <div><b>{fmt(view.sap.users)}</b><span>users</span></div>
+                  <div><b>{fmt(view.sap.users)}</b><span>{(view.landscape?.app.count ?? 1) > 1 ? "users here" : "users"}</span></div>
                   <div><b>{fmt(view.sap.jobs_running)}</b><span>jobs running</span></div>
                   <div><b>{fmt(view.sap.locks)}</b><span>locks</span></div>
                 </div>
@@ -202,6 +204,8 @@ export default function PerfDashboard() {
               ))}
             </section>
           ) : null}
+
+          {view.landscape ? <LandscapePanel land={view.landscape} hanaLive={view.hana} mode={view.mode} /> : null}
 
           <h2 className="px-h">SAP application server</h2>
           <section className="px-grid">{sap.map(k => <KpiTile key={k.id} k={k} />)}</section>

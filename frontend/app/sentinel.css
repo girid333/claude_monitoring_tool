@@ -381,3 +381,56 @@
 }
 .px-smon-c { min-width: 0; }
 .px-smon-c .px-spark { width: 100%; height: 44px; }
+
+/* D-052b landscape */
+.ls-hero { display: grid; grid-template-columns: 1fr auto; gap: 6px 16px; align-items: center; padding: 12px 14px; border-radius: var(--r-md, 10px);
+  background: rgba(12, 163, 12, 0.08); border: 1px solid rgba(12, 163, 12, 0.35); margin-bottom: 14px; }
+.ls-hero-n { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.ls-hero-n b { font-size: 18px; display: block; }
+.ls-hero-n small { display: block; color: var(--text-3); font-size: 12px; }
+.ls-hero-v { text-align: right; }
+.ls-hero-v b { font-size: 24px; display: block; font-variant-numeric: tabular-nums; }
+.ls-hero-v span { font-size: 11.5px; color: var(--text-3); }
+.ls-hero-c { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
+.ls-star { color: #fab219; font-size: 18px; margin-right: 4px; }
+.ls-chip { font-size: 11.5px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--text-2); white-space: nowrap; }
+.ls-chip.ok { border-color: rgba(12, 163, 12, 0.5); }
+.ls-chip.off { border-color: rgba(236, 131, 90, 0.6); }
+.ls-where { display: block; font-size: 11.5px; color: var(--text-3); }
+.ls-where em { font-style: normal; margin-left: 6px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px; }
+.ls-bars { position: relative; display: grid; gap: 8px; margin: 6px 0 10px; }
+.ls-bar { display: grid; grid-template-columns: 170px 1fr 80px; gap: 10px; align-items: center; font-size: 13px; }
+.ls-bar-n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ls-bar-n small { color: var(--text-3); margin-left: 6px; font-size: 11.5px; }
+.ls-bar-t { height: 10px; background: rgba(255, 255, 255, 0.06); border-radius: 5px; overflow: hidden; }
+.ls-bar-t span { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+.ls-bar-v { font-variant-numeric: tabular-nums; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 12.5px; }
+.ls-bar-v .px-pill { transform: scale(0.85); transform-origin: right; }
+.ls-bar.near .ls-bar-n { font-weight: 600; }
+.ls-target { position: absolute; top: -4px; bottom: -4px; border-left: 1px dashed rgba(255, 255, 255, 0.4); pointer-events: none; }
+.ls-target span { position: absolute; top: -14px; left: 4px; font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
+.ls-src { font-size: 12px; color: var(--text-3); margin: 8px 0 0; }
+.ls-how { font-size: 12px; color: var(--text-3); margin: 4px 0 0; padding-left: 18px; }
+.ls-sites { display: flex; gap: 12px; align-items: stretch; flex-wrap: wrap; margin-bottom: 12px; }
+.ls-site { flex: 1 1 200px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; position: relative; min-width: 0; }
+.ls-site-h { font-size: 12px; color: var(--text-3); margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ls-site.sec { border-style: dashed; }
+.ls-link { position: absolute; left: -12px; top: 50%; width: 12px; border-top: 2px dashed var(--text-3); }
+.ls-link span { position: absolute; top: -18px; left: -10px; font-size: 10px; color: var(--text-3); }
+.ls-host { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.ls-host:first-of-type { border-top: 0; }
+.ls-host.off { opacity: 0.6; }
+.ls-role { color: var(--text-3); font-size: 12px; text-transform: lowercase; }
+.ls-host-m, .ls-host .ls-where { grid-column: 1 / -1; font-size: 12px; color: var(--text-2); }
+.ls-apps { margin-top: 14px; }
+.ls-scroll { overflow-x: auto; }
+.ls-near td { background: rgba(250, 178, 25, 0.06); }
+@media (max-width: 720px) {
+  .ls-bar { grid-template-columns: 110px 1fr 72px; }
+  .ls-hero { grid-template-columns: 1fr; }
+  .ls-hero-v { text-align: left; }
+  .ls-target { display: none; }
+  .ls-link { display: none; }
+}
+.ls-apps .px-t th:nth-child(2), .ls-apps .px-t td:nth-child(2) { text-align: left; }
+.ls-apps .px-t td:nth-child(2) .ls-chip { margin: 2px 4px 0 0; display: inline-block; }

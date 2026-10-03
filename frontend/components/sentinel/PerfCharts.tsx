@@ -28,7 +28,7 @@ export function StatusPill({ rating }: { rating: Rating }) {
 /* ── tooltip ── */
 type Tip = { x: number; y: number; lines: [string, string, string?][]; title: string } | null;
 
-function useTip() {
+export function useTip() {
   const [tip, setTip] = useState<Tip>(null);
   const box = useRef<HTMLDivElement>(null);
   const show = (e: React.MouseEvent, title: string, lines: [string, string, string?][]) => {

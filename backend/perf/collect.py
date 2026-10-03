@@ -424,7 +424,7 @@ def hana_live(h: HanaViaSm69, notes: list[str]) -> dict:
                         "DISK_USED", "DISK_SIZE", "NETWORK_IN", "NETWORK_OUT") if c in lh]
     if {"HOST", "TIME", "CPU"} <= set(want):
         hosts = h.table(want, "FROM M_LOAD_HISTORY_HOST WHERE TIME > ADD_SECONDS(CURRENT_TIMESTAMP, -120) "
-                              "ORDER BY TIME DESC, HOST", top=8)
+                              "ORDER BY TIME DESC, HOST", top=48)
         seen, latest = set(), []
         for r in hosts:
             if r["HOST"] not in seen:
@@ -487,18 +487,43 @@ def hana_history_range(h: HanaViaSm69) -> Optional[str]:
     return ((r[0].get("D") or "")[:10] or None) if r else None
 
 
-def hana_day(h: HanaViaSm69, day: dt.date) -> list[dict]:
-    """Hourly CPU and memory for one day from the HANA load history."""
+def hana_day_hosts(h: HanaViaSm69, day: dt.date) -> dict[str, list[dict]]:
+    """Hourly CPU and memory per HANA host (scale-out: every worker host) from the load history."""
     nxt = day + dt.timedelta(days=1)
-    where = f"FROM M_LOAD_HISTORY_HOST WHERE TIME >= '{day}' AND TIME < '{nxt}' GROUP BY HOUR(TIME) ORDER BY 1"
-    cpu = {to_int(r.get("H")): r for r in h.query(f"SELECT HOUR(TIME) AS H, AVG(CPU) AS C, MAX(CPU) AS CM {where}")}
-    mem = {to_int(r.get("H")): r for r in h.query(
-        f"SELECT HOUR(TIME) AS H, AVG(MEMORY_USED) AS M, MAX(MEMORY_USED) AS MM, "
-        f"MAX(MEMORY_ALLOCATION_LIMIT) AS L {where}")}
+    where = (f"FROM M_LOAD_HISTORY_HOST WHERE TIME >= '{day}' AND TIME < '{nxt}' "
+             "GROUP BY HOST, HOUR(TIME) ORDER BY 1, 2")
+    cpu = {(r.get("O"), to_int(r.get("H"))): r for r in
+           h.query(f"SELECT HOST AS O, HOUR(TIME) AS H, AVG(CPU) AS C, MAX(CPU) AS CM {where}")}
+    mem = {(r.get("O"), to_int(r.get("H"))): r for r in h.query(
+        f"SELECT HOST O,HOUR(TIME) H,AVG(MEMORY_USED) M,MAX(MEMORY_USED) MM,MAX(MEMORY_ALLOCATION_LIMIT) L {where}")}
+    out: dict[str, list[dict]] = defaultdict(list)
+    for key in sorted(set(cpu) | set(mem)):
+        c, m = cpu.get(key, {}), mem.get(key, {})
+        out[key[0]].append({"hour": key[1], "cpu_avg": round(_f(c.get("C")) or 0, 1),
+                            "cpu_max": round(_f(c.get("CM")) or 0, 1),
+                            "mem_avg_gb": round((_f(m.get("M")) or 0) / GB, 1),
+                            "mem_max_gb": round((_f(m.get("MM")) or 0) / GB, 1),
+                            "limit_gb": round((_f(m.get("L")) or 0) / GB, 1)})
+    return dict(out)
+
+
+def worst_per_hour(per_host: dict[str, list[dict]]) -> list[dict]:
+    """One row per hour: highest CPU of any host, memory of the host closest to its limit."""
+    hours: dict[int, list[tuple[str, dict]]] = defaultdict(list)
+    for host, rows in per_host.items():
+        for r in rows:
+            hours[r["hour"]].append((host, r))
     out = []
-    for hr in sorted(set(cpu) | set(mem)):
-        c, m = cpu.get(hr, {}), mem.get(hr, {})
-        out.append({"hour": hr, "cpu_avg": round(_f(c.get("C")) or 0, 1), "cpu_max": round(_f(c.get("CM")) or 0, 1),
-                    "mem_avg_gb": round((_f(m.get("M")) or 0) / GB, 1), "mem_max_gb": round((_f(m.get("MM")) or 0) / GB, 1),
-                    "limit_gb": round((_f(m.get("L")) or 0) / GB, 1)})
+    for hr in sorted(hours):
+        rs = hours[hr]
+        mh, m = max(rs, key=lambda x: (x[1]["mem_max_gb"] / x[1]["limit_gb"]) if x[1]["limit_gb"] else 0)
+        ch, c = max(rs, key=lambda x: x[1]["cpu_max"])
+        out.append({"hour": hr, "cpu_avg": round(sum(x[1]["cpu_avg"] for x in rs) / len(rs), 1),
+                    "cpu_max": c["cpu_max"], "cpu_host": ch, "mem_avg_gb": m["mem_avg_gb"],
+                    "mem_max_gb": m["mem_max_gb"], "limit_gb": m["limit_gb"], "mem_host": mh, "hosts": len(rs)})
     return out
+
+
+def hana_day(h: HanaViaSm69, day: dt.date) -> list[dict]:
+    """Hourly CPU and memory for one day; with several hosts, the worst host per hour."""
+    return worst_per_hour(hana_day_hosts(h, day))
