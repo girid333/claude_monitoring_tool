@@ -659,6 +659,58 @@ passed SAP's check, inner = no action after triage; the gap is removed noise.
 - Tests: `test_perf_smon_sched` (12; fake XBP with MASK check, overlap
   refusal, /SDF/MON mode) and `test_ui_perf` test_05 (form → schedule → stop).
 
+### D-053 (2026-10-06) — Replay that behaves like eCATT/CBTA (WebGUI).
+Giri: "the record is doing good job, but the replay has different
+requirements… equal to ecatt/CBTA but using webgui." Review found replay
+was a blind keystroke player. Built (Giri chose all four extras):
+- **SAP control IDs from `lsdata`** (verified on F4H's real markup): every
+  WebGUI control carries `{"SID":"wnd[0]/usr/ctxtFIELD","Type":"GuiCTextField"}`
+  in its `lsdata` JSON even with scripting OFF. Recorder stores it in
+  `Target.sid` (+ `dom.sid_type`); DomResolver tries it first (0.98,
+  "sap_id:"). Containers (wnd[0]/usr, toolbars, GuiShell…) are skipped
+  (`webgui_dom.CONTAINER_TYPES`). When an lsdata SID was recorded and is not
+  on screen, weak tiers (css class, substring text, pos_id, path) are NOT
+  tried — they clicked the first dialog button instead of the recorded one.
+- **Roundtrip wait:** `sync.NetworkTracker` + `wait_roundtrip` — wait for
+  requests started AFTER the action, then quiet + busy layer. Fixes the race
+  where the busy layer appears late and the next step hit the old screen.
+- **Message handling:** status bar = `id="wnd[0]/sbar_msg"`, type from lsdata
+  `messageType` or icon `lsMessageBar__icon--Error|Warning|Ok|Info|Stop`.
+  E/A after a roundtrip fails the step unless the next step is a status-bar
+  check that ACCEPTS it (`Flow.stop_on_error_message`, default on). No
+  roundtrip → message not re-judged.
+- **Screens and dialogs:** title recorded per step (`Step.screen`, digits
+  ignored on compare) and named in failures ("expected screen X but on Y").
+  `dom.window` = main | wnd[N]; dialog steps are scoped to the open dialog;
+  a main-screen step or KEY with an unrecorded dialog open fails ("unexpected
+  dialog …") after one `dismiss_known_popups` try — never clicked through.
+- **Keys:** Enter/F-key flushes the pending field edit first (the browser
+  reports Enter before `change` — replay used to press Enter on an empty
+  field). Shift/Ctrl F-keys, Ctrl+Shift F-keys, Ctrl+S, Esc, (Ctrl+)PageUp/Down
+  → SAP vkeys (`key_to_vkey`/`vkey_to_key`); `Step.key` replays the exact key,
+  focused in the recorded field. Alt combos ignored; AltGr typed as text.
+- **Double-click** (`Act.DBLCLICK`), the two clicks of the gesture dropped
+  only when on the same element; UI sends `second_only` for slow ones.
+- **Table cells by position** (`dom.cell`: row/col, aria indexes, column
+  header, table id/own SID, header signature) — text is data. Exact text
+  match before substring (flagged 0.55).
+- **eCATT extras:** `Act.GET` export variables (field or status bar, optional
+  regex group) → `{{var}}` in later values/T-codes, `FlowRunResult.variables`,
+  data-run `exports` in the evidence document; recorded checks (field value,
+  list has rows via DOM table/ALV read, status-message type) read the screen
+  live; `Step.optional` ("only if present", PATCH /api/flows/{id}/steps/{i},
+  checkbox in the step viewer); failure screenshot `_FAILED.png` + repair item.
+  Recorder toolbar: Save field value / Save status message / Check field
+  value / Check list has rows / Check status message type — pick mode never
+  clicks in SAP. `/api/recorder/stop` validates flow names.
+- Tests: `test_ecatt_replay` (21) on `fake_webgui_txn.py` — copies F4H
+  markup, AJAX roundtrips with a late busy layer, positional ids changing
+  every roundtrip, decoy buttons, sometimes-dialog, surprise dialog. Two
+  proof-based reviews found 15 bugs, all fixed and re-verified.
+- **Not verified live:** the browser pane on Giri's Mac could not load F4H and
+  the device VM has no Chromium (CDN blocked) — markup came from F4H's served
+  HTML/CSS/JS, the full screens from the fake. Giri to record a flow on F4H.
+
 ---
 
 ## 3. Architecture Snapshot
@@ -1154,6 +1206,12 @@ buffers coloured, "use read-only sources" global, export/refresh busy
 clash, HANA platform fallback, 0 % memory for unknown limit. Regression
 tests: `test_review_fixes` (15) + additions in test_perf / test_perf_smon_sched.
 Verified on F4H: live/day views, top SQL, 36 s AHC pull.
+
+**2026-10-06 — Session 26 (D-053 eCATT-grade replay).** Reviewed the whole
+record/replay path; replay gaps listed to Giri (13 items) and fixed with the
+four extras he chose (export variables, recorded checks, optional steps,
+ALV read). F4H markup inspected read-only via its served HTML/CSS/JS
+(lsdata SIDs, message bar, title). 42 suites green. Not committed.
 
 *(Append new dated entries here every working session: what was built/decided,
 what changed, what's next.)*

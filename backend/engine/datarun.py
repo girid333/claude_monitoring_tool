@@ -57,6 +57,7 @@ class IterationResult:
     failed_steps: list[str] = field(default_factory=list)
     duration_ms: int = 0
     notes: list[str] = field(default_factory=list)
+    exports: dict[str, Any] = field(default_factory=dict)   # D-053: values read during the run
 
     def as_dict(self) -> dict:
         return {
@@ -64,6 +65,7 @@ class IterationResult:
             "error": self.error, "outcome": self.outcome,
             "screenshots": self.screenshots, "failed_steps": self.failed_steps,
             "duration_ms": self.duration_ms, "notes": self.notes,
+            "exports": self.exports,
         }
 
 

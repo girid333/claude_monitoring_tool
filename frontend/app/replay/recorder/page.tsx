@@ -13,7 +13,14 @@ import { apiBase } from "../../lib/api";
 const API = apiBase();
 
 type SystemRow = { sid: string; system_name?: string; release_tag: string; auth: string };
-type Step = { act: string; target: string; value: unknown; resolved_by: string };
+type Step = { act: string; target: string; value: unknown; resolved_by: string; sap_id?: string | null };
+// D-053: eCATT-style steps added by picking an element on the screen.
+type PickKind = "get" | "check_field" | "check_rows";
+const PICK_HELP: Record<PickKind, string> = {
+  get: "Click the field whose value you want to save as a variable",
+  check_field: "Click the field whose current value the replay must find",
+  check_rows: "Click inside the list that must not be empty",
+};
 
 export default function RecorderPage() {
   const [systems, setSystems] = useState<SystemRow[]>([]);
@@ -27,6 +34,10 @@ export default function RecorderPage() {
   const [flowId, setFlowId] = useState("");
   const [tcode, setTcode] = useState("");          // D-034: start transaction
   const [saved, setSaved] = useState<string | null>(null);
+  const [pick, setPick] = useState<PickKind | null>(null);   // D-053
+  const [varName, setVarName] = useState("");
+  const [pattern, setPattern] = useState("");
+  const [note, setNote] = useState("");
   const imgRef = useRef<HTMLImageElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -127,22 +138,91 @@ export default function RecorderPage() {
   };
 
   // Map a click on the rendered image back to browser viewport pixels.
-  const onImgClick = (e: React.MouseEvent<HTMLImageElement>) => {
+  const toViewport = (e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current;
-    if (!img) return;
+    if (!img) return null;
     const r = img.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * viewport.width;
-    const y = ((e.clientY - r.top) / r.height) * viewport.height;
-    void send([{ kind: "click", x: Math.round(x), y: Math.round(y) }]);
+    return { x: Math.round(((e.clientX - r.left) / r.width) * viewport.width),
+             y: Math.round(((e.clientY - r.top) / r.height) * viewport.height) };
+  };
+
+  // D-053: a browser fires click, click, dblclick for a double-click. Single
+  // clicks wait briefly so a double-click is sent to SAP as ONE double-click.
+  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pickRef = useRef<PickKind | null>(null);    // guards against a 2nd pick in flight
+  useEffect(() => { pickRef.current = pick; }, [pick]);
+  const onImgClick = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (e.detail > 1) return;               // part of a double-click
+    const p = toViewport(e);
+    if (!p) return;
+    const k = pickRef.current;
+    if (k) { pickRef.current = null; setPick(null); void doPick(k, p.x, p.y); return; }
+    if (clickTimer.current) clearTimeout(clickTimer.current);
+    clickTimer.current = setTimeout(() => {
+      clickTimer.current = null;
+      void send([{ kind: "click", ...p }]);
+    }, 260);
+  };
+  const onImgDoubleClick = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (pick || pickRef.current) return;
+    const p = toViewport(e);
+    if (!p) return;
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current); clickTimer.current = null;
+      void send([{ kind: "dblclick", ...p }]);
+    } else {
+      // the first click already went to SAP — send only the second half,
+      // so SAP sees one double-click, not three clicks
+      void send([{ kind: "dblclick", second_only: true, ...p }]);
+    }
+  };
+
+  const postStep = async (path: string, body: Record<string, unknown>) => {
+    setError(""); setNote("");
+    try {
+      const res = await fetch(`${API}/api/recorder/${path}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recording_id: recId, ...body }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.detail || `HTTP ${res.status}`);
+      if (j.steps) setSteps(j.steps);
+      return j;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  };
+
+  const doPick = async (kind: PickKind, x: number, y: number) => {
+    const j = await postStep("pick", { kind, x, y, var: varName.trim(), pattern: pattern.trim() });
+    if (j?.picked) setNote(kind === "get"
+      ? `Saved as {{${varName.trim()}}} — recorded value ${JSON.stringify(j.picked.value)}`
+      : `Check added — recorded value ${JSON.stringify(j.picked.value)}`);
+  };
+
+  const messageStep = async (kind: "get_message" | "check_message") => {
+    const j = await postStep("message", { kind, var: varName.trim(), pattern: pattern.trim() });
+    if (j?.message) setNote(kind === "get_message"
+      ? `Message saved as {{${varName.trim()}}}: ${j.message.text}`
+      : `Check added — message type ${j.message.type || "(none)"}: ${j.message.text}`);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (!recId) return;
+    // typing into this page's own inputs (variable name, pattern) is not SAP input
+    const t = e.target as HTMLElement;
+    if (t.closest && t.closest("input,textarea,select,button")) return;
     e.preventDefault();
-    if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const altGr = e.getModifierState && e.getModifierState("AltGraph");
+    if (e.key.length === 1 && (altGr || (e.ctrlKey && e.altKey))) {
+      void send([{ kind: "text", text: e.key }]);   // @ \ { } on European keyboards
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       void send([{ kind: "text", text: e.key }]);
     } else {
-      void send([{ kind: "key", key: e.key, code: e.code }]);
+      // D-053: modifiers travel too (CDP bitmask) — Shift+F5, Ctrl+S.
+      const modifiers = (e.altKey ? 1 : 0) | (e.ctrlKey || e.metaKey ? 2 : 0) | (e.shiftKey ? 8 : 0);
+      void send([{ kind: "key", key: e.key, code: e.code, modifiers }]);
     }
   };
 
@@ -237,7 +317,8 @@ export default function RecorderPage() {
               📄 Capture all pages
             </button>
             <label style={{ fontSize: 12.5, color: "var(--text-2)", marginLeft: 6 }}>Name</label>
-            <input className="input" value={flowId} onChange={e => setFlowId(e.target.value)}
+            <input className="input" value={flowId}
+                   onChange={e => setFlowId(e.target.value.replace(/[^A-Za-z0-9_.-]/g, "_"))}
                    placeholder="sm37_cancelled_jobs" style={{ width: 200 }} />
             <button className="btn" disabled={busy || !flowId.trim()} onClick={stop}
                     style={{ marginLeft: "auto" }}>
@@ -257,7 +338,10 @@ export default function RecorderPage() {
               <img ref={imgRef} alt="Live SAP session"
                    src={`data:image/jpeg;base64,${frame}`}
                    onClick={onImgClick}
-                   style={{ width: "100%", display: "block", borderRadius: 8, cursor: "crosshair" }} />
+                   onDoubleClick={onImgDoubleClick}
+                   style={{ width: "100%", display: "block", borderRadius: 8,
+                            cursor: pick ? "cell" : "crosshair",
+                            outline: pick ? "2px solid var(--orange)" : "none" }} />
             ) : (
               <div className="shimmer" style={{ height: 420, borderRadius: 8 }} />
             )}
@@ -280,9 +364,49 @@ export default function RecorderPage() {
                 — or use your mouse wheel over the screen.
               </span>
             </div>
+            {/* D-053: eCATT-style variables and checks */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap",
+                          paddingTop: 10, borderTop: "1px solid var(--hairline)" }}>
+              <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>Variable</span>
+              <input className="input" value={varName} onChange={e => setVarName(e.target.value)}
+                     placeholder="po_number" style={{ width: 120, fontSize: 11.5, padding: "3px 8px" }}
+                     title="Name used later as {{po_number}} in field values or the T-code" />
+              <span style={{ fontSize: 11.5, color: "var(--text-3)" }}>Pattern</span>
+              <input className="input" value={pattern} onChange={e => setPattern(e.target.value)}
+                     placeholder="(\d+)  optional" style={{ width: 110, fontSize: 11.5, padding: "3px 8px" }}
+                     title="Optional regex; its first group (or the whole match) becomes the value" />
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      disabled={!varName.trim()} onClick={() => setPick(pick === "get" ? null : "get")}>
+                ⤓ Save field value
+              </button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      disabled={!varName.trim()} onClick={() => messageStep("get_message")}>
+                ⤓ Save status message
+              </button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={() => setPick(pick === "check_field" ? null : "check_field")}>
+                ✓ Check field value
+              </button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={() => setPick(pick === "check_rows" ? null : "check_rows")}>
+                ✓ Check list has rows
+              </button>
+              <button className="btn secondary" style={{ fontSize: 11.5, padding: "3px 10px" }}
+                      onClick={() => messageStep("check_message")}>
+                ✓ Check status message type
+              </button>
+            </div>
+            {pick && (
+              <div style={{ fontSize: 12, color: "var(--orange)", marginTop: 6 }}>
+                {PICK_HELP[pick]} — nothing is clicked in SAP.{" "}
+                <span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => setPick(null)}>cancel</span>
+              </div>
+            )}
+            {note && <div style={{ fontSize: 12, color: "var(--green)", marginTop: 6 }}>✓ {note}</div>}
             <div style={{ fontSize: 11.5, color: "var(--text-3)", marginTop: 6 }}>
               Click directly on the screen above. Click this panel first, then type —
-              keystrokes go to SAP. Enter and F-keys are recorded as SAP virtual keys.
+              keystrokes go to SAP. Enter, Esc, Ctrl+S and (Shift/Ctrl+) F-keys are recorded as SAP
+              virtual keys; double-click works too.
             </div>
           </div>
 

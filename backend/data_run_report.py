@@ -25,6 +25,11 @@ from docx.shared import Inches, Pt, RGBColor
 from flow_report import _pdf_image_ok, _rgb, _safe
 
 
+def _esc(v) -> str:
+    from xml.sax.saxutils import escape
+    return escape(str(v))
+
+
 class DataRunReportGenerator:
     """One document per data-driven run.
 
@@ -156,6 +161,10 @@ class DataRunReportGenerator:
                 r = p.add_run(f"Outcome: {it['outcome']}")
                 r.bold = True
                 r.font.size = Pt(10)
+            if it.get("exports"):
+                p = doc.add_paragraph()
+                r = p.add_run("Values read: " + ", ".join(f"{k} = {v}" for k, v in it["exports"].items()))
+                r.font.size = Pt(9.5)
             if it.get("error"):
                 p = doc.add_paragraph()
                 r = p.add_run(f"Error: {it['error']}")
@@ -242,6 +251,9 @@ class DataRunReportGenerator:
                     small))
             if it.get("outcome"):
                 story.append(Paragraph(f"<b>Outcome:</b> {it['outcome']}", small))
+            if it.get("exports"):
+                story.append(Paragraph("<b>Values read:</b> " + ", ".join(
+                    f"{_esc(k)} = {_esc(v)}" for k, v in it["exports"].items()), small))
             if it.get("error"):
                 story.append(Paragraph(
                     f"<font color='#C5221F'><b>Error:</b> {it['error']}</font>", small))

@@ -60,7 +60,10 @@ async def main():
     check("5. Detail carries the full step count", body["step_count"] == len(data["steps"]),
           f"{body['step_count']} vs {len(data['steps'])}")
     check("6. Steps are human-readable (act/target/value/resolved_by)",
-          all(set(st.keys()) == {"act", "target", "value", "resolved_by"} for st in body["steps"]),
+          all({"act", "target", "value", "resolved_by"} <= set(st.keys())
+              and set(st.keys()) <= {"act", "target", "value", "resolved_by",
+                                      "sap_id", "optional", "screen"}   # D-053
+              for st in body["steps"]),
           json.dumps(body["steps"][:2]))
     set_row = next(st for st in body["steps"] if st["act"] == "set")
     check("7. The typed value is visible in the readable view",

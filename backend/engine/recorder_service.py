@@ -206,6 +206,17 @@ async def dispatch_input(recording_id: str, ev: dict) -> None:
             await s.cdp.send("Input.dispatchMouseEvent", {
                 "type": t, "x": x, "y": y, "button": button, "clickCount": 1,
             })
+    elif kind == "dblclick":
+        # D-053: a real double-click: two press/release pairs, the second
+        # with clickCount=2, which is what makes the browser fire dblclick.
+        x, y = float(ev.get("x", 0)), float(ev.get("y", 0))
+        await s.cdp.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        # second_only: the UI already sent the first click on its own (the
+        # user's double-click was slower than the UI's click delay)
+        for count in ((2,) if ev.get("second_only") else (1, 2)):
+            for t in ("mousePressed", "mouseReleased"):
+                await s.cdp.send("Input.dispatchMouseEvent", {
+                    "type": t, "x": x, "y": y, "button": "left", "clickCount": count})
     elif kind == "move":
         await s.cdp.send("Input.dispatchMouseEvent", {
             "type": "mouseMoved", "x": float(ev.get("x", 0)), "y": float(ev.get("y", 0)),
@@ -228,12 +239,15 @@ async def dispatch_input(recording_id: str, ev: dict) -> None:
     elif kind == "key":
         key = ev.get("key", "")
         code = ev.get("code", "")
-        vk = _VK.get(key, 0)
+        vk = _VK.get(key, 0) or (ord(key.upper()) if len(key) == 1 and key.isalnum() else 0)
         base = {"key": key, "code": code, "windowsVirtualKeyCode": vk,
                 "nativeVirtualKeyCode": vk,
                 "modifiers": int(ev.get("modifiers", 0))}
         await s.cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **base})
-        if len(key) == 1:
+        # A character only when no Ctrl/Alt/Meta is held: Ctrl+S must save,
+        # not type an "s" into the focused field (CDP modifiers: Alt=1,
+        # Ctrl=2, Meta=4, Shift=8).
+        if len(key) == 1 and not (base["modifiers"] & 7):
             await s.cdp.send("Input.dispatchKeyEvent", {"type": "char", "text": key, **base})
         await s.cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **base})
     else:
@@ -253,6 +267,77 @@ def add_capture_step(recording_id: str, note: str = "", pages: int = 0) -> dict:
     else:
         s.recorder.add_capture(note)
     return {"steps": s.recorder.steps_preview()}
+
+
+async def pick_step(recording_id: str, kind: str, x: float, y: float,
+                    var: str = "", pattern: str = "") -> dict:
+    """D-053: add a "save value as variable" / "check value" / "check list
+    has rows" step for the element at (x, y) — described in the page,
+    never clicked, so picking a button can't trigger it."""
+    import re as _re
+    s = get_session(recording_id)
+    if kind == "get" and not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,40}", var or ""):
+        raise ValueError("variable name must be letters, digits or _ (e.g. po_number)")
+    if pattern:
+        try:
+            _re.compile(pattern)
+        except _re.error as exc:
+            raise ValueError(f"invalid pattern: {exc}") from exc
+    # Walk down through iframes: WebGUI may host the session in one, and
+    # elementFromPoint in the parent only returns the <iframe> itself.
+    info = None
+    frame = s.page.main_frame
+    fx, fy = float(x), float(y)
+    for _depth in range(4):
+        try:
+            info = await frame.evaluate(
+                "([x, y]) => window.__rec_describe_at ? window.__rec_describe_at(x, y) : null",
+                [fx, fy])
+        except Exception:  # noqa: BLE001
+            info = None
+        tag = ((info or {}).get("dom") or {}).get("tag")
+        if tag not in ("iframe", "frame"):
+            break
+        try:
+            handle = await frame.evaluate_handle("([x, y]) => document.elementFromPoint(x, y)", [fx, fy])
+            child = await handle.as_element().content_frame()
+            box = await handle.as_element().bounding_box()
+        except Exception:  # noqa: BLE001
+            child, box = None, None
+        if child is None or box is None:
+            info = None
+            break
+        frame, fx, fy = child, float(x) - box["x"], float(y) - box["y"]
+    if not info:
+        raise ValueError("nothing to pick at that point")
+    if kind == "check_rows" and not (info.get("in_table") or (info.get("dom") or {}).get("cell")):
+        raise ValueError("that is not a table — click inside the list you want to check")
+    s.recorder.add_pick(kind, info, var=var, pattern=pattern)
+    return {"steps": s.recorder.steps_preview(), "picked": {
+        "value": info.get("value"), "sap_id": info.get("sid"), "screen": info.get("screen")}}
+
+
+async def message_step(recording_id: str, kind: str, var: str = "", pattern: str = "") -> dict:
+    """D-053: check the current status-bar message type, or save its text
+    (optionally a regex group, e.g. the document number) as a variable."""
+    import re as _re
+    from .webgui_dom import read_statusbar
+    s = get_session(recording_id)
+    msg = await read_statusbar(s.page)
+    if not msg.get("text"):
+        raise ValueError("the status bar is empty — nothing to check or save")
+    if kind == "get_message":
+        if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,40}", var or ""):
+            raise ValueError("variable name must be letters, digits or _ (e.g. po_number)")
+        if pattern:
+            try:
+                m = _re.search(pattern, msg["text"])
+            except _re.error as exc:
+                raise ValueError(f"invalid pattern: {exc}") from exc
+            if not m:
+                raise ValueError(f"pattern {pattern!r} does not match the message {msg['text']!r}")
+    s.recorder.add_message_step(kind, msg, var=var, pattern=pattern)
+    return {"steps": s.recorder.steps_preview(), "message": msg}
 
 
 async def screenshot(recording_id: str) -> str:

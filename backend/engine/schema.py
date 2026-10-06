@@ -47,6 +47,22 @@ class DomCandidates(BaseModel):
     # order (e.g. SM37 job overview: Scheduled/Released/Ready/Active/
     # Finished/Cancelled).
     checkbox_index: Optional[int] = None
+    # D-053: eCATT/CBTA-grade identity. WebGUI (Lightspeed) stores the SAP GUI
+    # scripting ID of every control in its `lsdata` attribute — e.g.
+    # {"SID":"wnd[0]/usr/ctxtDATABROWSE-TABLENAME","Type":"GuiCTextField"} —
+    # whether or not sapgui/user_scripting is on (verified on F4H). That ID is
+    # the same stable contract eCATT and CBTA record against, so the recorder
+    # captures it into Target.sid and the DOM resolver tries it first.
+    sid_type: Optional[str] = None             # SAP control type from lsdata
+    # D-053: which window the element lived in at record time: "main",
+    # "popup", or the SAP window id ("wnd[1]") when known. Replay scopes the
+    # lookup to the open dialog, and refuses to type into the main screen
+    # while an unexpected dialog is covering it.
+    window: Optional[str] = None
+    # D-053: table cell identity, positional like eCATT records it:
+    # {"row": 3, "col": 2, "column": "Vendor", "table": "<id/SID>"}. Text of a
+    # cell is DATA and changes run to run; its position does not.
+    cell: Optional[dict[str, Any]] = None
 
 
 class Target(BaseModel):
@@ -76,6 +92,8 @@ class Act(str, Enum):
     SCROLL = "scroll"             # D-037: restore a scroll position before capturing
     CAPTURE = "capture"           # screenshot and/or structured read
     CHECK = "check"               # assertion on last capture
+    DBLCLICK = "dblclick"         # D-053: double-click (ALV drill-down, F2 lists)
+    GET = "get"                   # D-053: eCATT export parameter — read a value into a variable
 
 
 class CheckOp(str, Enum):
@@ -110,11 +128,29 @@ class Step(BaseModel):
     pages: Optional[int] = None
 
     # check-specific
-    type: Optional[Literal["row_count", "cell_value", "statusbar_type", "field_value", "text"]] = None
+    type: Optional[Literal["row_count", "cell_value", "statusbar_type", "statusbar_text",
+                           "field_value", "text"]] = None
     op: Optional[CheckOp] = None
     column: Optional[str] = None
     severity: Optional[Severity] = None
     message: Optional[str] = None
+
+    # D-053: keyboard — the exact key the user pressed ("Shift+F5",
+    # "Control+S"). `value` keeps the SAP vkey number for scripting mode.
+    key: Optional[str] = None
+    # D-053: export parameter (act=get): variable name, where to read
+    # ("field" = the target, "statusbar" = the message bar) and an optional
+    # regex whose first group (or whole match) is the value.
+    var: Optional[str] = None
+    source: Optional[Literal["field", "statusbar"]] = None
+    pattern: Optional[str] = None
+    # D-053: a step that only applies when its element is there — e.g. a
+    # "Data will be lost" dialog that appears on some runs. Skipped, not
+    # failed, when its target cannot be found.
+    optional: bool = False
+    # D-053: the screen title at record time. Replay compares it (digits
+    # ignored) to explain a missing element ("expected screen X, on Y").
+    screen: Optional[str] = None
 
     # bookkeeping
     note: Optional[str] = None                 # recorder-written human note
@@ -127,6 +163,10 @@ class Flow(BaseModel):
     applies_to: list[str] = Field(default_factory=lambda: ["*"])  # release-tag globs (D-006)
     params: dict[str, Any] = Field(default_factory=dict)          # defaults; datasets override
     steps: list[Step]
+    # D-053: eCATT default message handling — an error (E) or abort (A)
+    # message after a roundtrip fails the step, unless the next step is a
+    # status-bar check that expects it.
+    stop_on_error_message: bool = True
 
     schema_version: int = 1
 
@@ -141,6 +181,8 @@ class StepResult(BaseModel):
     screenshot_path: Optional[str] = None
     screenshot_paths: Optional[list[str]] = None   # D-039: paginated capture
     extracted: Optional[Any] = None             # structured capture payload
+    message: Optional[dict[str, str]] = None    # D-053: status bar after this step
+    skipped: bool = False                       # D-053: optional step not present
 
 
 class CheckResult(BaseModel):
@@ -162,3 +204,4 @@ class FlowRunResult(BaseModel):
     checks: list[CheckResult] = Field(default_factory=list)
     ok: bool = False
     error: Optional[str] = None
+    variables: dict[str, Any] = Field(default_factory=dict)   # D-053: exported values

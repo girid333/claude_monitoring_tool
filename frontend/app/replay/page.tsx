@@ -21,7 +21,8 @@ type FlowInfo = {
   flow_id: string; description: string; step_count: number;
   tcodes: string[]; has_capture: boolean;
 };
-type FlowStep = { act: string; target: string; value: unknown; resolved_by: string };
+type FlowStep = { act: string; target: string; value: unknown; resolved_by: string;
+                  optional?: boolean; screen?: string | null; sap_id?: string | null };
 // D-049: one recorded field wired to a spreadsheet column.
 type DataBinding = {
   step_index: number; column: string; label: string; recorded_value: unknown;
@@ -178,6 +179,21 @@ export default function Replay() {
     } catch (err) {
       setDataError(err instanceof Error ? err.message : String(err));
       setDataBusy(false);
+    }
+  };
+
+  // D-053: mark a step "only if present" — saved into the flow itself.
+  const toggleOptional = async (flowId: string, index: number, optional: boolean) => {
+    try {
+      const res = await fetch(`${API}/api/flows/${encodeURIComponent(flowId)}/steps/${index}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ optional }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const j = await res.json();
+      setFlowDetail(prev => prev && prev.flow_id === flowId ? { ...prev, steps: j.steps } : prev);
+    } catch (err) {
+      setFlowDetailError(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -491,7 +507,9 @@ export default function Replay() {
                           <th style={{ padding: "3px 8px", fontWeight: 500, width: 90 }}>action</th>
                           <th style={{ padding: "3px 8px", fontWeight: 500 }}>target</th>
                           <th style={{ padding: "3px 8px", fontWeight: 500 }}>value</th>
-                          <th style={{ padding: "3px 0", fontWeight: 500, width: 80 }}>resolved by</th>
+                          <th style={{ padding: "3px 8px", fontWeight: 500, width: 80 }}>resolved by</th>
+                          <th style={{ padding: "3px 0", fontWeight: 500, width: 64 }}
+                              title="Optional: skipped, not failed, when the element isn't there (e.g. a dialog that only appears sometimes)">optional</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -532,7 +550,16 @@ export default function Replay() {
                                                        : {}) }} />
                                 ) : recorded}
                               </td>
-                              <td style={{ padding: "4px 0", color: "var(--text-3)" }}>{s.resolved_by}</td>
+                              <td style={{ padding: "4px 8px", color: "var(--text-3)" }}
+                                  title={s.sap_id ? `SAP control ID ${s.sap_id}${s.screen ? ` on '${s.screen}'` : ""}` : (s.screen ? `screen '${s.screen}'` : "")}>
+                                {s.resolved_by}
+                              </td>
+                              <td style={{ padding: "4px 0" }}>
+                                {["set", "press", "dblclick", "get", "check", "select"].includes(s.act) && (
+                                  <input type="checkbox" checked={!!s.optional}
+                                         onChange={e => void toggleOptional(viewingFlow!, i, e.target.checked)} />
+                                )}
+                              </td>
                             </tr>
                           );
                         })}

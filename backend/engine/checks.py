@@ -26,6 +26,13 @@ def compare(actual: Any, op: CheckOp, expected: Any) -> bool:
     return False
 
 
+def _num(v: Any) -> Any:
+    try:
+        return int(v) if isinstance(v, str) and v.strip().lstrip("-").isdigit() else v
+    except ValueError:
+        return v
+
+
 def evaluate(step: Step, last_capture: dict[str, Any]) -> CheckResult:
     severity = step.severity or Severity.MEDIUM
     op = step.op or CheckOp.EQ
@@ -33,7 +40,7 @@ def evaluate(step: Step, last_capture: dict[str, Any]) -> CheckResult:
 
     if step.type == "row_count":
         actual = len(last_capture.get("table", []))
-        ok = compare(actual, op, step.value)
+        ok = compare(actual, op, _num(step.value))
 
     elif step.type == "cell_value":
         # Passes iff NO row's <column> violates op/value?  No — semantics:
@@ -48,6 +55,10 @@ def evaluate(step: Step, last_capture: dict[str, Any]) -> CheckResult:
 
     elif step.type == "statusbar_type":
         actual = (last_capture.get("statusbar") or {}).get("type", "")
+        ok = compare(actual, op, step.value)
+
+    elif step.type == "statusbar_text":
+        actual = (last_capture.get("statusbar") or {}).get("text", "")
         ok = compare(actual, op, step.value)
 
     elif step.type == "field_value":

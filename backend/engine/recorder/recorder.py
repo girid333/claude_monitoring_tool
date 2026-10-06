@@ -28,13 +28,14 @@ from pathlib import Path
 
 from playwright.async_api import Page
 
-from ..schema import Act, DomCandidates, Flow, Step, Target
+from ..resolvers.dom import key_to_vkey
+from ..schema import Act, CheckOp, DomCandidates, Flow, Step, Target
+from ..webgui_dom import HELPERS_JS
 
 # Injected into every frame. Captures rich, ranked identification metadata
 # at the moment of interaction — the DOM is guaranteed to still look the way
 # the user saw it, which is what makes replay in a later session work.
-_INJECT_JS = r"""
-(() => {
+_INJECT_BODY = r"""
   if (window.__rec_active) return;
   window.__rec_active = true;
 
@@ -181,21 +182,61 @@ _INJECT_JS = r"""
       path: structuralPath(el),
       frame_url: location.href,
       checkbox_index: checkboxIndex(el),
+      // D-053: SAP control type, window and table-cell position.
+      sid_type: (__guiSid(el) || {}).type || null,
+      window: __windowOf(el),
+      cell: __cellOf(el),
     };
   }
 
-  function emit(kind, ev, el, value) {
+  // D-053: the SAP control ID from WebGUI's own lsdata — same ID eCATT
+  // records, present whether or not GUI scripting is enabled.
+  function sapId(el, ev) {
+    const g = __guiSid(el);
+    if (g) return g.sid;
+    return scriptingIdAt((ev && ev.clientX) || 0, (ev && ev.clientY) || 0);
+  }
+
+  function keyCombo(ev) {
+    let k = ev.key;
+    if (!k || ev.altKey) return null;   // Alt+F4 is not F4 (value help)
+    const named = k === 'Enter' || k === 'Escape' || k === 'PageUp' || k === 'PageDown'
+               || /^F\d{1,2}$/.test(k);
+    const ctrlS = (ev.ctrlKey || ev.metaKey) && (k === 's' || k === 'S');
+    if (!named && !ctrlS) return null;
+    if (ctrlS) return 'Control+S';
+    let pre = '';
+    if (ev.ctrlKey) pre += 'Control+';
+    if (ev.shiftKey && k !== 'Enter') pre += 'Shift+';
+    return pre + k;
+  }
+
+  function emit(kind, ev, el, value, extra) {
     try {
-      window.__rec_emit({
+      const msg = {
         kind: kind,
         value: value === undefined ? null : value,
-        sid: scriptingIdAt(ev.clientX || 0, ev.clientY || 0),
+        sid: sapId(el, ev),
         dom: domMeta(el),
-        key: ev.key || null,
+        key: (ev && ev.key) || null,
+        screen: __screen(el),
         ts: Date.now(),
-      });
+      };
+      if (extra) Object.assign(msg, extra);
+      window.__rec_emit(msg);
     } catch (e) { /* never break the page being recorded */ }
   }
+
+  // D-053: pick mode — describe the element under a point WITHOUT clicking
+  // it, so "save this value" / "check this field" never presses a button.
+  window.__rec_describe_at = function (x, y) {
+    let el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    const field = el.closest && el.closest('input,select,textarea,[role=checkbox],[role=radio]');
+    if (field) el = field;
+    return { sid: sapId(el, null), dom: domMeta(el), value: __valueOf(el), screen: __screen(el),
+             in_table: !!__cellOf(el) };
+  };
 
   // D-042: remembers each field's value AS OF the moment it gained focus,
   // so the blur listener below can tell "the user actually edited this"
@@ -204,14 +245,27 @@ _INJECT_JS = r"""
   // clicking elsewhere recorded a phantom `set Job Name = "*"` step —
   // visible in a real recording via the new step viewer (D-041).
   const __focusVals = new WeakMap();
+  // D-053: the value each field was last RECORDED with, so the Enter-flush
+  // below and the browser's own change event can't record the same edit
+  // twice.
+  const __emitted = new WeakMap();
   document.addEventListener("focusin", ev => {
     const el = ev.target;
     if (el && el.tagName === "INPUT") __focusVals.set(el, el.value);
   }, true);
 
+  function isOkCode(el) {
+    const title = (el.getAttribute && el.getAttribute("title")) || "";
+    const name = (el.getAttribute && el.getAttribute("name")) || "";
+    return title === "Command Field" || name === "~OkCode"
+        || (el.id || "").toLowerCase().indexOf("okcd") >= 0;
+  }
+
   document.addEventListener("change", ev => {
     const el = ev.target;
     const v = (el.type === "checkbox" || el.type === "radio") ? el.checked : el.value;
+    if (typeof v === "string" && __emitted.has(el) && __emitted.get(el) === v) return;
+    if (typeof v === "string") __emitted.set(el, v);
     emit("set", ev, el, v);
   }, true);
 
@@ -245,10 +299,17 @@ _INJECT_JS = r"""
     // "*"`, neither ever actually typed).
     const before = __focusVals.has(el) ? __focusVals.get(el) : null;
     if (before === el.value) return;
+    if (__emitted.has(el) && __emitted.get(el) === el.value) return;
+    __emitted.set(el, el.value);
     emit("set", ev, el, el.value);
   }, true);
 
   document.addEventListener("click", ev => {
+    // D-053: a click INTO a text field inside a table cell used to resolve
+    // to the <td> via closest() and record a phantom press on the cell.
+    const t0 = ev.target;
+    if (t0 && t0.tagName === "INPUT" && ["text", "password", "search", ""].indexOf(t0.type || "") >= 0) return;
+    if (t0 && t0.tagName === "TEXTAREA") return;
     const el = (ev.target.closest && ev.target.closest(
       "button,[role=button],a,input[type=submit],input[type=button]," +
       "[role=tab],[role=treeitem],[role=checkbox],td,tr")) || ev.target;
@@ -279,7 +340,30 @@ _INJECT_JS = r"""
   }, true);
 
   document.addEventListener("keydown", ev => {
-    if (ev.key === "Enter" || /^F\d{1,2}$/.test(ev.key)) emit("key", ev, ev.target);
+    const combo = keyCombo(ev);
+    if (!combo) return;
+    const el = ev.target;
+    // D-053: the browser reports Enter BEFORE the field's change event, so
+    // "type a value, press Enter" was recorded as Enter-then-value and
+    // replayed Enter on an empty field. Record the pending edit first.
+    if (el && el.tagName === "INPUT" && ["text", "search", "password", ""].indexOf(el.type || "") >= 0
+        && !isOkCode(el)) {
+      const before = __focusVals.has(el) ? __focusVals.get(el) : el.defaultValue;
+      const last = __emitted.has(el) ? __emitted.get(el) : before;
+      if (el.value !== last && el.type !== "password") {
+        __emitted.set(el, el.value);
+        emit("set", ev, el, el.value);
+      }
+    }
+    emit("key", ev, el, null, { key: combo });
+  }, true);
+
+  // D-053: double-click (drill-down in ALV lists, choosing an F4 value).
+  document.addEventListener("dblclick", ev => {
+    const t = ev.target;
+    const el = (t && t.closest && (t.closest("input,select,textarea")
+      || t.closest("button,[role=button],a,[role=treeitem],td,[role=gridcell],tr"))) || t;
+    emit("dblclick", ev, el);
   }, true);
 
   // NOTE (D-038): scrolling is NOT captured here.
@@ -290,10 +374,12 @@ _INJECT_JS = r"""
   // came back identical. Scroll is captured server-side as the WHEEL GESTURE
   // that produced it (recorder_service.dispatch_input), which reproduces on
   // replay regardless of how the grid implements scrolling.
-})();
 """
 
-# SAP virtual keys: Enter=0, F1..F12 = 1..12 (D-008).
+_INJECT_JS = "(() => {" + HELPERS_JS + _INJECT_BODY + "})();"
+
+# SAP virtual keys: Enter=0, F1..F12 = 1..12 (D-008); D-053 adds Shift/Ctrl
+# F-keys, Ctrl+S, Esc and Page Up/Down — see resolvers.dom.key_to_vkey.
 _KEY_TO_VKEY = {"Enter": 0, **{f"F{i}": i for i in range(1, 13)}}
 
 
@@ -382,6 +468,23 @@ class Recorder:
         self.events.append({"kind": "wheel",
                              "value": {"x": x, "y": y, "dx": dx, "dy": dy}})
 
+    # ── D-053: eCATT-style steps added from the recorder toolbar ─────────
+    # Picked elements are described WITHOUT being clicked (pick mode), so
+    # choosing a field to check or read never presses anything in SAP.
+
+    def add_pick(self, kind: str, info: dict, var: str = "", pattern: str = "") -> None:
+        if kind not in ("get", "check_field", "check_rows"):
+            raise ValueError(f"unknown pick kind {kind!r}")
+        self.events.append({"kind": kind, "sid": info.get("sid"), "dom": info.get("dom") or {},
+                            "value": info.get("value"), "screen": info.get("screen"),
+                            "var": var, "pattern": pattern})
+
+    def add_message_step(self, kind: str, message: dict, var: str = "", pattern: str = "") -> None:
+        if kind not in ("get_message", "check_message"):
+            raise ValueError(f"unknown message step {kind!r}")
+        self.events.append({"kind": kind, "value": dict(message or {}), "var": var,
+                            "pattern": pattern})
+
     async def stop(self, flow_id: str, description: str = "") -> Flow:
         steps = self._coalesce(self.events)
         self.events = []
@@ -389,6 +492,24 @@ class Recorder:
 
     def _coalesce(self, events: list[dict]) -> list[Step]:
         steps: list[Step] = []
+        # D-053: a double-click arrives as click, click, dblclick. The two
+        # clicks are part of the gesture, not steps of their own.
+        events = list(events)
+        for j, ev in enumerate(events):
+            if ev.get("kind") != "dblclick":
+                continue
+            dropped = 0
+            for k in range(j - 1, -1, -1):
+                prev = events[k]
+                if dropped >= 2 or prev.get("kind") != "click":
+                    break
+                # only clicks ON THE SAME element, close in time — a real
+                # click recorded just before must survive
+                if (abs((ev.get("ts") or 0) - (prev.get("ts") or 0)) > 800
+                        or not _same_event_target(prev, ev)):
+                    break
+                events[k] = {**prev, "kind": "_drop"}
+                dropped += 1
         for ev in events:
             dom_raw = {k: v for k, v in (ev.get("dom") or {}).items() if v is not None}
             target = None
@@ -416,15 +537,52 @@ class Recorder:
                         and _same_target(steps[-1].target, target)):
                     steps[-1].value = ev.get("value")
                     continue
-                steps.append(Step(act=Act.SET, target=target, value=ev.get("value")))
+                steps.append(Step(act=Act.SET, target=target, value=ev.get("value"),
+                                  screen=ev.get("screen")))
 
-            elif kind == "key" and ev.get("key") in _KEY_TO_VKEY:
-                steps.append(Step(act=Act.VKEY, value=_KEY_TO_VKEY[ev["key"]]))
+            elif kind == "key":
+                combo = ev.get("key") or ""
+                vkey = key_to_vkey(combo)
+                if vkey is None:
+                    continue
+                steps.append(Step(act=Act.VKEY, value=vkey, key=combo, target=target,
+                                  screen=ev.get("screen")))
                 steps.append(Step(act=Act.WAIT_READY))
 
             elif kind == "click":
-                steps.append(Step(act=Act.PRESS, target=target))
+                steps.append(Step(act=Act.PRESS, target=target, screen=ev.get("screen")))
                 steps.append(Step(act=Act.WAIT_READY))
+
+            elif kind == "dblclick":
+                steps.append(Step(act=Act.DBLCLICK, target=target, screen=ev.get("screen")))
+                steps.append(Step(act=Act.WAIT_READY))
+
+            elif kind == "get":
+                steps.append(Step(act=Act.GET, target=target, var=ev.get("var") or "value",
+                                  source="field", pattern=ev.get("pattern") or None,
+                                  screen=ev.get("screen")))
+
+            elif kind == "check_field":
+                v = ev.get("value")
+                steps.append(Step(act=Act.CHECK, target=target, type="field_value",
+                                  op=CheckOp.EQ, value=v, screen=ev.get("screen"),
+                                  message=f"field value is {v!r}"))
+
+            elif kind == "check_rows":
+                steps.append(Step(act=Act.CHECK, target=target, type="row_count",
+                                  op=CheckOp.GT, value=0, screen=ev.get("screen"),
+                                  message="list is not empty"))
+
+            elif kind == "get_message":
+                steps.append(Step(act=Act.GET, source="statusbar", var=ev.get("var") or "message",
+                                  pattern=ev.get("pattern") or None))
+
+            elif kind == "check_message":
+                m = ev.get("value") or {}
+                steps.append(Step(act=Act.CHECK, type="statusbar_type", op=CheckOp.EQ,
+                                  value=m.get("type", ""),
+                                  message=f"status message type {m.get('type') or '(none)'}"
+                                          + (f" — recorded: {m.get('text')}" if m.get("text") else "")))
 
             elif kind == "wheel":
                 # D-038: a scroll gesture — replayed as a real wheel event.
@@ -440,6 +598,16 @@ class Recorder:
                 steps.append(Step(act=Act.SCROLL, target=target, value=ev.get("value")))
 
         return steps
+
+
+def _same_event_target(a: dict, b: dict) -> bool:
+    if a.get("sid") or b.get("sid"):
+        return a.get("sid") == b.get("sid")
+    da, db = a.get("dom") or {}, b.get("dom") or {}
+    for k in ("pos_id", "path"):
+        if da.get(k) or db.get(k):
+            return da.get(k) == db.get(k)
+    return False
 
 
 def _same_scroll_target(a: Target | None, b: Target | None) -> bool:
@@ -493,6 +661,10 @@ def describe_steps(steps: list[Step]) -> list[dict]:
                 label = t.dom.css_hint or t.dom.path
                 low_confidence_label = bool(label)
         checkbox_i = t.dom.checkbox_index if (t and t.dom) else None
+        cell = t.dom.cell if (t and t.dom) else None
+        if cell and s.act in (Act.PRESS, Act.DBLCLICK, Act.SET, Act.GET, Act.CHECK):
+            col = cell.get("column") or f"col {cell.get('col', 0) + 1}"
+            label = f"row {cell.get('row', 0) + 1}, {col}" + (f" ({label})" if label else "")
         if s.act == Act.START_TCODE:
             label = f"T-code {s.value}"
         elif s.act == Act.CAPTURE:
@@ -505,7 +677,21 @@ def describe_steps(steps: list[Step]) -> list[dict]:
         elif checkbox_i is not None:
             kind = t.dom.role if (t and t.dom and t.dom.role) else "checkbox"
             label = f"{kind} #{checkbox_i}" + (f" ({label})" if label else "")
+        elif s.act == Act.VKEY:
+            label = s.key or f"vkey {s.value}"
+        elif s.act == Act.GET and s.source == "statusbar":
+            label = "status bar message"
+        elif s.act == Act.CHECK and s.type in ("statusbar_type", "statusbar_text"):
+            label = "status bar message"
         value = s.value if not isinstance(s.value, dict) else None
+        if s.act == Act.VKEY:
+            value = None
+        if s.act == Act.GET:
+            value = "→ {{" + (s.var or "") + "}}" + (f" (pattern {s.pattern})" if s.pattern else "")
+        if s.act == Act.CHECK:
+            what = {"field_value": "value", "row_count": "rows", "statusbar_type": "type",
+                    "statusbar_text": "text", "cell_value": "every cell", "text": "screen text"}.get(s.type or "", s.type)
+            value = f"{what} {s.op.value if s.op else '=='} {s.value!r}"
         if s.act == Act.SET and isinstance(value, bool) and checkbox_i is not None:
             kind = t.dom.role if (t and t.dom and t.dom.role) else "checkbox"
             value = ("select" if kind == "radio" else "check") if value else "uncheck"
@@ -516,10 +702,15 @@ def describe_steps(steps: list[Step]) -> list[dict]:
             "act": s.act.value,
             "target": target,
             "value": value,
-            "resolved_by": ("scripting" if (t and t.sid)
+            # D-053: a recorded SAP control ID (from WebGUI's lsdata) is the
+            # strongest identity — shown as "SAP ID" whichever resolver runs.
+            "resolved_by": ("SAP ID" if (t and t.sid)
                              else "dom" if t
-                             else "manual" if s.act in (Act.START_TCODE, Act.CAPTURE)
+                             else "manual" if s.act in (Act.START_TCODE, Act.CAPTURE, Act.GET, Act.CHECK)
                              else "n/a"),
+            "sap_id": t.sid if t else None,
+            "optional": bool(s.optional),
+            "screen": s.screen,
         })
     return out
 

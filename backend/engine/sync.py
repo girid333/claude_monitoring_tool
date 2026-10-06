@@ -96,3 +96,87 @@ async def wait_ready(
         await asyncio.sleep(POLL_INTERVAL_S)
 
     raise WaitTimeout(f"wait_ready exceeded {timeout_s}s")
+
+
+# ── D-053: roundtrip-aware waiting ─────────────────────────────────────────
+#
+# wait_ready() alone has a race: right after a click, SAP has not yet shown
+# its busy layer, so "no busy layer" holds for two polls and the engine moves
+# on — onto the OLD screen. eCATT never has this problem because SAP GUI
+# tells it when the roundtrip ends. In a browser the honest signal is the
+# network: WebGUI sends every roundtrip as a request (XHR delta or a full
+# document POST), so "a request started and every request has finished, and
+# the screen has been quiet since" is the WebGUI equivalent of session.Busy.
+
+_TRACKED_TYPES = {"document", "xhr", "fetch"}
+
+
+class NetworkTracker:
+    """Counts in-flight page requests that can carry a WebGUI roundtrip."""
+
+    def __init__(self, page: Page):
+        self.page = page
+        self.inflight = 0
+        self.started = 0                 # total requests seen, ever
+        self.last_activity = time.monotonic()
+        # request -> sequence number, so a wait only waits for requests that
+        # started AFTER its action (a long-poll already open must not count)
+        self._pending: dict = {}
+        page.on("request", self._on_request)
+        page.on("requestfinished", self._on_done)
+        page.on("requestfailed", self._on_done)
+
+    def pending_since(self, mark: int) -> int:
+        return sum(1 for seq in self._pending.values() if seq > mark)
+
+    def _tracked(self, request) -> bool:
+        try:
+            return request.resource_type in _TRACKED_TYPES
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _on_request(self, request) -> None:
+        if self._tracked(request):
+            self.inflight += 1
+            self.started += 1
+            self._pending[request] = self.started
+            self.last_activity = time.monotonic()
+
+    def _on_done(self, request) -> None:
+        if self._tracked(request):
+            self.inflight = max(0, self.inflight - 1)
+            self._pending.pop(request, None)
+            self.last_activity = time.monotonic()
+
+
+async def wait_roundtrip(page: Page, tracker: Optional[NetworkTracker], mark: int,
+                         timeout_s: float = 30.0, grace_s: float = 1.2,
+                         quiet_s: float = 0.3, scripting_mode: bool = False) -> bool:
+    """Wait for the roundtrip triggered by an action to finish.
+
+    `mark` is tracker.started taken just BEFORE the action. If no request
+    starts within `grace_s` the action was client-side only (opening a
+    dropdown, focusing a field) and we return after the normal readiness
+    check. Returns True when a roundtrip was observed."""
+    deadline = time.monotonic() + timeout_s
+    saw = False
+    if tracker is not None:
+        grace_end = time.monotonic() + grace_s
+        while time.monotonic() < grace_end:
+            if tracker.started > mark:
+                saw = True
+                break
+            await asyncio.sleep(0.05)
+        if saw:
+            while time.monotonic() < deadline:
+                if (tracker.pending_since(mark) == 0
+                        and time.monotonic() - tracker.last_activity >= quiet_s):
+                    break
+                await asyncio.sleep(0.05)
+            try:
+                await page.wait_for_load_state("domcontentloaded",
+                                               timeout=max(1.0, deadline - time.monotonic()) * 1000)
+            except Exception:  # noqa: BLE001 - frame swapped mid-wait; readiness check below decides
+                pass
+    await wait_ready(page, max(1.0, deadline - time.monotonic()), scripting_mode)
+    return saw

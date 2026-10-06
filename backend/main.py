@@ -626,6 +626,46 @@ def recorder_capture(req: RecorderCaptureRequest) -> dict:
         raise HTTPException(404, "unknown recording_id")
 
 
+class RecorderPickRequest(BaseModel):
+    recording_id: str
+    kind: str                # get | check_field | check_rows
+    x: float
+    y: float
+    var: str = ""
+    pattern: str = ""
+
+
+@app.post("/api/recorder/pick")
+async def recorder_pick(req: RecorderPickRequest) -> dict:
+    """D-053: eCATT-style export variable / check on a picked element."""
+    from engine.recorder_service import pick_step
+    try:
+        return await pick_step(req.recording_id, req.kind, req.x, req.y, req.var, req.pattern)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+class RecorderMessageRequest(BaseModel):
+    recording_id: str
+    kind: str                # get_message | check_message
+    var: str = ""
+    pattern: str = ""
+
+
+@app.post("/api/recorder/message")
+async def recorder_message(req: RecorderMessageRequest) -> dict:
+    """D-053: check the status-bar message type, or save it as a variable."""
+    from engine.recorder_service import message_step
+    try:
+        return await message_step(req.recording_id, req.kind, req.var, req.pattern)
+    except KeyError:
+        raise HTTPException(404, "unknown recording_id")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
 # ── Recorded flow library (D-034) ────────────────────────────────────────
 
 FLOWS_DIR = os.environ.get("FLOWS_DIR", "flows")
@@ -679,6 +719,34 @@ def flow_detail(flow_id: str) -> dict:
     }
 
 
+class StepFlagsRequest(BaseModel):
+    optional: bool | None = None
+
+
+@app.patch("/api/flows/{flow_id}/steps/{index}")
+def update_step_flags(flow_id: str, index: int, req: StepFlagsRequest) -> dict:
+    """D-053: mark a recorded step optional ("only if present") — e.g. a
+    confirmation dialog that appears on some runs. This edits the saved
+    flow on purpose: it is part of the test script, like eCATT's
+    conditional blocks, not a one-off replay override (D-043)."""
+    if "/" in flow_id or "\\" in flow_id or flow_id.startswith("."):
+        raise HTTPException(400, "invalid flow_id")
+    p = Path(FLOWS_DIR) / f"{flow_id}.json"
+    if not p.exists():
+        raise HTTPException(404, "flow not found")
+    from engine.recorder.recorder import describe_steps
+    from engine.schema import Flow
+    flow = Flow(**json.loads(p.read_text()))
+    if not 0 <= index < len(flow.steps):
+        raise HTTPException(400, f"no step {index}")
+    if req.optional is not None:
+        flow.steps[index].optional = bool(req.optional)
+    # write back to the file that was read (its name and the flow_id inside
+    # can differ after a copy/rename)
+    p.write_text(flow.model_dump_json(indent=2, exclude_none=True))
+    return {"flow_id": flow_id, "steps": describe_steps(flow.steps)}
+
+
 @app.delete("/api/flows/{flow_id}")
 def delete_flow(flow_id: str) -> dict:
     # Guard against path traversal — flow_id comes straight off the URL.
@@ -694,6 +762,9 @@ def delete_flow(flow_id: str) -> dict:
 @app.post("/api/recorder/stop")
 async def recorder_stop(req: RecorderStopRequest) -> dict:
     from engine.recorder_service import stop_recording
+    # The flow name becomes a file name — keep it inside FLOWS_DIR.
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.\-]{0,80}", req.flow_id or ""):
+        raise HTTPException(400, "flow name may use letters, digits, _ . - only")
     try:
         return await stop_recording(req.recording_id, req.flow_id, req.description)
     except KeyError:

@@ -185,6 +185,14 @@ async def execute_data_run(
                                        for s in fr.steps if not s.ok]
             if fr.error:
                 iteration.error = str(fr.error)
+            iteration.exports = dict(fr.variables or {})
+            failed_checks = [c for c in fr.checks if not c.ok]
+            if failed_checks:
+                msgs = [f"check failed: {c.message or 'check'} "
+                        f"(found {c.actual!r}, expected {c.expected!r})" for c in failed_checks]
+                iteration.notes.extend(msgs)
+                # a red row must say WHY in the summary, not only in the notes
+                iteration.error = iteration.error or msgs[0]
         except Exception as exc:  # noqa: BLE001 - one row never kills the run
             iteration.ok = False
             iteration.error = f"iteration failed: {exc!r}"
